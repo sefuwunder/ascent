@@ -254,6 +254,7 @@ async function vOverview() {
       ${kpis.map(([l, v, s]) => `<div class="card kpi">
         <div class="k-label">${l}</div><div class="k-value">${v}</div><div class="k-sub">${s}</div></div>`).join("")}
     </div>
+    ${timeHealthWidget(otaskMap, d.project_list)}
     ${d.attention.length ? `
     <div class="section-title">Needs attention</div>
     <div class="card" style="padding:8px 10px">
@@ -285,15 +286,61 @@ async function vOverview() {
 }
 
 /* ---------- per-project remaining-time estimates (word-bag estimator) ---------- */
-// Sum of point estimates for a project's open (non-done) tasks; "" when none estimable.
-function projectRemainingEst(tasks) {
-  let sum = 0, n = 0;
+// Raw per-project estimate: sum of point estimates for open (non-done) tasks,
+// plus coverage counts (estimated vs open-but-unestimable tasks).
+function projectEstRaw(tasks) {
+  let sum = 0, estimated = 0, total = 0;
   for (const t of tasks || []) {
     if (!t || t.status === "done") continue;
+    total++;
     const e = Estimate.estimateTask(t.title);
-    if (e) { sum += e.point; n++; }
+    if (e) { sum += e.point; estimated++; }
   }
-  return n ? `≈${Estimate.fmtMins(sum)}` : "";
+  return { sum, estimated, total };
+}
+
+// Sum of point estimates for a project's open (non-done) tasks; "" when none estimable.
+function projectRemainingEst(tasks) {
+  const r = projectEstRaw(tasks);
+  return r.estimated ? `≈${Estimate.fmtMins(r.sum)}` : "";
+}
+
+// T-shirt size bucket for a raw minute figure (mirrors estimate.js classifyTask).
+function estSizeForMins(m) {
+  return m < 15 ? "xs" : m < 30 ? "s" : m < 60 ? "m" : m < 120 ? "l" : "xl";
+}
+
+// Overall time-health widget: total remaining across all projects, a per-project
+// bar list, and an honest coverage footer. Empty state when nothing is estimable.
+function timeHealthWidget(taskMap, projectList) {
+  const rows = (projectList || [])
+    .map((p) => Object.assign({ p }, projectEstRaw(taskMap[p.id])))
+    .sort((a, b) => b.sum - a.sum);
+  const estimated = rows.reduce((s, r) => s + r.estimated, 0);
+  if (!estimated) {
+    return `<div class="card time-health"><div class="th-label">Time health</div>
+      <div class="empty th-empty"><span class="big">⏱</span>No estimates yet — tasks with recognizable words will show up here.</div></div>`;
+  }
+  const listed = rows.filter((r) => r.estimated > 0);
+  const total = listed.reduce((s, r) => s + r.sum, 0);
+  const max = listed[0].sum;
+  const shown = listed.slice(0, 8);
+  const hidden = listed.length - shown.length;
+  const unestimated = rows.reduce((s, r) => s + (r.total - r.estimated), 0);
+  return `<div class="card time-health">
+    <div class="th-label">Time health</div>
+    <div class="th-total">≈${Estimate.fmtMins(total)} <span class="th-total-sub">remaining</span></div>
+    <div class="th-bars">
+      ${shown.map((r) => `
+      <div class="th-row">
+        <span class="th-name">${esc(r.p.name)}</span>
+        <div class="th-track"><div class="th-bar est-${estSizeForMins(r.sum)}" style="width:${Math.round((r.sum / max) * 100)}%"></div></div>
+        <span class="th-val">≈${Estimate.fmtMins(r.sum)}</span>
+      </div>`).join("")}
+    </div>
+    ${hidden > 0 ? `<div class="th-more">+${hidden} more</div>` : ""}
+    <div class="th-foot">based on ${estimated} estimated task${estimated === 1 ? "" : "s"} · ${unestimated} task${unestimated === 1 ? "" : "s"} had no estimate</div>
+  </div>`;
 }
 
 // Fetch task lists for the displayed projects; a failed project just yields no estimate.
@@ -784,4 +831,4 @@ initTheme();
 route();
 
 // test seam
-globalThis.__test = { taskCard, duePill, fmtDate, COLUMNS, md, vOverview, vProjects, vProjectDetail, vSetup, renderSetup, renderWikiList, renderWikiPane, selectArticle, openModal, projectModal, taskModal, importModal, initTheme, toggleTheme, paintThemeToggle, route, openDrawer, closeDrawer, toggleDrawer, isDrawerOpen, renderBoard, projectRemainingEst, fetchProjectTasks, Estimate };
+globalThis.__test = { taskCard, duePill, fmtDate, COLUMNS, md, vOverview, vProjects, vProjectDetail, vSetup, renderSetup, renderWikiList, renderWikiPane, selectArticle, openModal, projectModal, taskModal, importModal, initTheme, toggleTheme, paintThemeToggle, route, openDrawer, closeDrawer, toggleDrawer, isDrawerOpen, renderBoard, projectRemainingEst, projectEstRaw, estSizeForMins, timeHealthWidget, fetchProjectTasks, Estimate };

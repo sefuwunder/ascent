@@ -72,7 +72,8 @@ Estimates surface five ways, all styled with the Solarized accent palette and no
 - the same chip inside the task modal, **updating live as you type the title**;
 - a **per-column total** (sum of point estimates, e.g. `≈3.5h`) in each kanban column header;
 - a **per-project estimate** on the projects grid — each project card shows `⏱ ≈40m remaining`, the sum of point estimates for that project's open (non-done) tasks;
-- the same per-project figure inline in each overview **Project health** row.
+- the same per-project figure inline in each overview **Project health** row;
+- an overall **Time health widget** on the overview dashboard — a card showing the total estimated remaining across all projects (e.g. `≈38h`), a per-project horizontal bar list (proportional to the heaviest project, capped at 8 rows with `+N more`), and an honest coverage footer (`based on N estimated tasks · M tasks had no estimate`). A tasteful "No estimates yet" empty state appears when nothing is estimable.
 
 Per-project estimates are computed client-side by fetching each displayed project's task list (one extra request per project; a project whose tasks fail to load simply shows no estimate).
 
