@@ -52,6 +52,16 @@ Ascent's UI is a **dependency-free visual port of [shadcn/ui](https://ui.shadcn.
 
 The shadcn tokens carry a **Solarized day/night theme**: Solarized light (`#fdf6e3`) is the default, Solarized dark (`#002b36`) is one tap away via the ☾/☀ button in the topbar. The choice persists in `localStorage`; with no stored preference it follows your OS `prefers-color-scheme`. Status and severity colors (kanban column dots, due-date pills, badges) use the Solarized accent set in both themes.
 
+### iOS look & feel
+
+On top of the design system, Ascent wears an **iOS-style skin**:
+
+- **Frosted glass** — the topbar, sidebar, dialogs, dropdowns, and toasts use `backdrop-filter: blur() saturate()` over theme-aware translucent surfaces (Solarized-tinted in both themes), with `-webkit-` prefixes for Safari.
+- **Apple system typography** (`-apple-system, BlinkMacSystemFont, "SF Pro Text" …`), bolder view titles, and softer, larger corner radii.
+- **iOS controls** — native checkboxes render as iOS switches, task checkmarks are iOS Reminders-style circles, and the Board | Wiki tabs are a pill-shaped iOS segmented control.
+- **Tasteful motion** — views fade-and-rise on navigation, dialogs spring in with the iOS easing (`cubic-bezier(0.32, 0.72, 0, 1)`), toasts slide up from the bottom edge, buttons press-scale, and project/task cards lift on hover. Everything is instant under `prefers-reduced-motion`.
+- **Responsive drawer** — at **≤900px** the sidebar collapses into an off-canvas drawer: opened by the ☰ button in the topbar, it slides in with the iOS spring, and closes via the blurred scrim, the ✕ button, `Esc`, or any navigation (focus moves into the drawer for keyboard users). On small screens the kanban becomes a horizontally scrollable snap list, the topbar condenses (truncated title, hidden subtitle), and dashboards go single-column.
+
 ### API
 
 The Bun server exposes a small facade over Anytype:

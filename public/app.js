@@ -132,6 +132,28 @@ function showChrome(show, spaceName = "") {
   if (spaceName) $("#space-name").textContent = spaceName;
 }
 
+/* ---------- mobile drawer (off-canvas sidebar at <=900px) ---------- */
+let drawerOpen = false;
+function openDrawer() {
+  drawerOpen = true;
+  if (document.body && document.body.classList) document.body.classList.add("drawer-open");
+  const sb = $("#sidebar");
+  if (sb) { if (sb.classList) sb.classList.add("open"); if (sb.focus) sb.focus(); }
+  const sc = $("#scrim");
+  if (sc && sc.setAttribute) sc.setAttribute("aria-hidden", "false");
+}
+function closeDrawer() {
+  if (!drawerOpen) return;
+  drawerOpen = false;
+  if (document.body && document.body.classList) document.body.classList.remove("drawer-open");
+  const sb = $("#sidebar");
+  if (sb && sb.classList) sb.classList.remove("open");
+  const sc = $("#scrim");
+  if (sc && sc.setAttribute) sc.setAttribute("aria-hidden", "true");
+}
+function toggleDrawer() { if (drawerOpen) closeDrawer(); else openDrawer(); }
+function isDrawerOpen() { return drawerOpen; }
+
 /* ---------- setup wizard ---------- */
 let setupState = { step: 1, challenge_id: "", spaces: [] };
 
@@ -688,6 +710,7 @@ function taskModal(pid, existing) {
 
 /* ---------- router ---------- */
 async function route() {
+  closeDrawer();
   const h = location.hash || "#/overview";
   const st = await GET("/api/status").catch(() => ({ paired: false, has_space: false }));
   if ((!st.paired || !st.has_space) && h !== "#/setup") { location.hash = "#/setup"; return; }
@@ -707,8 +730,17 @@ async function route() {
 window.addEventListener("hashchange", route);
 const themeBtn = $("#theme-toggle");
 if (themeBtn) themeBtn.onclick = toggleTheme;
+const navBtn = $("#nav-toggle");
+if (navBtn) navBtn.onclick = toggleDrawer;
+const scrimEl = $("#scrim");
+if (scrimEl) scrimEl.onclick = closeDrawer;
+const drawerCloseBtn = $("#drawer-close");
+if (drawerCloseBtn) drawerCloseBtn.onclick = closeDrawer;
+if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+  window.addEventListener("keydown", (e) => { if (e && e.key === "Escape") closeDrawer(); });
+}
 initTheme();
 route();
 
 // test seam
-globalThis.__test = { taskCard, duePill, fmtDate, COLUMNS, md, vOverview, vProjects, vProjectDetail, vSetup, renderSetup, renderWikiList, renderWikiPane, selectArticle, openModal, projectModal, taskModal, importModal, initTheme, toggleTheme, paintThemeToggle };
+globalThis.__test = { taskCard, duePill, fmtDate, COLUMNS, md, vOverview, vProjects, vProjectDetail, vSetup, renderSetup, renderWikiList, renderWikiPane, selectArticle, openModal, projectModal, taskModal, importModal, initTheme, toggleTheme, paintThemeToggle, route, openDrawer, closeDrawer, toggleDrawer, isDrawerOpen };

@@ -10,10 +10,11 @@
 </head>
 <body>
 <div id="app">
-  <aside class="sidebar" id="sidebar" style="display:none">
+  <aside class="sidebar" id="sidebar" tabindex="-1" style="display:none">
     <div class="brand">
       <div class="brand-mark">◭</div>
       <div><div class="brand-name">Ascent</div><div class="brand-sub" id="space-name"></div></div>
+      <button class="btn btn-ghost btn-icon drawer-close" id="drawer-close" aria-label="Close menu">✕</button>
     </div>
     <div class="nav-label">Workspace</div>
     <a class="nav-item" href="#/overview" data-nav="overview"><span class="ico">◈</span> Overview</a>
@@ -24,6 +25,7 @@
   </aside>
   <div class="main">
     <header class="topbar" id="topbar" style="display:none">
+      <button class="btn btn-ghost btn-icon hamburger" id="nav-toggle" aria-label="Open menu" title="Menu">☰</button>
       <div><h1 id="page-title">Overview</h1><div class="sub" id="page-sub"></div></div>
       <div class="spacer"></div>
       <div id="topbar-actions"></div>
@@ -33,6 +35,7 @@
   </div>
 </div>
 <div id="modal-root"></div>
+<div class="scrim" id="scrim" aria-hidden="true"></div>
 <div id="toasts"></div>
 <script src="/app.js"></script>
 </body>
