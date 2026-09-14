@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ascent — Project management on Anytype</title>
+<link rel="stylesheet" href="/styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>◭</text></svg>">
+</head>
+<body>
+<div id="app">
+  <aside class="sidebar" id="sidebar" style="display:none">
+    <div class="brand">
+      <div class="brand-mark">◭</div>
+      <div><div class="brand-name">Ascent</div><div class="brand-sub" id="space-name"></div></div>
+    </div>
+    <div class="nav-label">Workspace</div>
+    <a class="nav-item" href="#/overview" data-nav="overview"><span class="ico">◈</span> Overview</a>
+    <a class="nav-item" href="#/projects" data-nav="projects"><span class="ico">▦</span> Projects</a>
+    <div class="nav-label">System</div>
+    <a class="nav-item" href="#/setup" data-nav="setup"><span class="ico">⚙</span> Connection</a>
+    <div class="side-foot"><span class="dot"></span><span id="conn-label">Anytype connected</span></div>
+  </aside>
+  <div class="main">
+    <header class="topbar" id="topbar" style="display:none">
+      <div><h1 id="page-title">Overview</h1><div class="sub" id="page-sub"></div></div>
+      <div class="spacer"></div>
+      <div id="topbar-actions"></div>
+    </header>
+    <div class="view" id="view"></div>
+  </div>
+</div>
+<div id="modal-root"></div>
+<div id="toasts"></div>
+<script src="/app.js"></script>
+</body>
+</html>

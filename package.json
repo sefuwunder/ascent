@@ -1,0 +1,1 @@
+{"description":"Glossy enterprise project management with Anytype as the data backend","name":"ascent","scripts":{"start":"bun src/server.ts"},"version":"1.0.0"}
