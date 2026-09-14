@@ -11,8 +11,9 @@ import {
 } from "./anytype";
 import {
   ClickUpError, cuFetch, validateToken, getTeams, getSpaces, getFolders,
-  getSpaceLists, getFolderLists, getListTasks, taskToDraft, planImport,
-  type CuTask,
+  getSpaceLists, getFolderLists, getListTasks, getListInfo, getCuTask,
+  updateCuTask, createCuTask, taskToDraft, planImport,
+  cuStatusToColumn, columnToCuStatus, type CuTask, type CuStatus,
 } from "./clickup";
 
 const PORT = Number(process.env.PORT || 3004);
@@ -29,9 +30,25 @@ interface Config {
 interface TaskLink { project_id: string; status: string; source: "ascent" | "imported" }
 interface ProjectLink { id: string; source: "ascent" | "imported"; added_at: string }
 interface WikiLink { project_id: string; source: "ascent" | "imported"; added_at: string }
-// ClickUp integration state: the Personal API token (server-side only) and the
-// clickup task id → Anytype task id dedupe map, so re-imports skip known tasks.
-interface ClickUpState { token: string; tasks: Record<string, string> }
+// ClickUp integration state: the Personal API token (server-side only), the
+// clickup task id → Anytype task id dedupe map (survives disconnects), the
+// per-project list bindings for two-way sync, and the per-task sync snapshots
+// that make change detection and conflict resolution possible.
+interface CuBinding { list_id: string; list_name: string; last_sync: string | null }
+interface CuSyncFields { name: string; desc: string; due: string; column: string }
+interface CuSyncState {
+  clickup_id: string;
+  anytype_id: string;
+  clickup_updated: number; // ClickUp date_updated (epoch-ms) as of last sync
+  anytype_updated: number; // Anytype updated_at (epoch-ms) as of last sync
+  fields: CuSyncFields;    // normalized field values as of last sync
+}
+interface ClickUpState {
+  token: string;
+  tasks: Record<string, string>;
+  bindings: Record<string, CuBinding>; // project_id → bound list
+  sync: Record<string, CuSyncState>;   // anytype task id → sync state
+}
 interface Links { projects: ProjectLink[]; tasks: Record<string, TaskLink>; wiki: Record<string, WikiLink>; clickup: ClickUpState }
 
 function loadJson<T>(path: string, fallback: T): T {
@@ -47,13 +64,15 @@ function saveJson(path: string, v: unknown) {
 }
 
 let config: Config = loadJson<Config>(CONFIG_PATH, { api_key: "", space_id: "", space_name: "", task_keys: { done: "done", due: "due_date" } });
-let links: Links = loadJson<Links>(LINKS_PATH, { projects: [], tasks: {}, wiki: {}, clickup: { token: "", tasks: {} } });
+let links: Links = loadJson<Links>(LINKS_PATH, { projects: [], tasks: {}, wiki: {}, clickup: { token: "", tasks: {}, bindings: {}, sync: {} } });
 if (config.api_key) setApiKey(config.api_key);
 
 const saveConfig = () => saveJson(CONFIG_PATH, config);
 const saveLinks = () => saveJson(LINKS_PATH, links);
 if (!links.wiki) { links.wiki = {}; saveLinks(); } // upgrade path for pre-wiki link indexes
-if (!links.clickup) { links.clickup = { token: "", tasks: {} }; saveLinks(); } // upgrade path for pre-ClickUp link indexes
+if (!links.clickup) { links.clickup = { token: "", tasks: {}, bindings: {}, sync: {} }; saveLinks(); } // upgrade path for pre-ClickUp link indexes
+if (!links.clickup.bindings) { links.clickup.bindings = {}; saveLinks(); } // upgrade path for pre-sync stores
+if (!links.clickup.sync) { links.clickup.sync = {}; saveLinks(); } // upgrade path for pre-sync stores
 
 const STATUSES = ["backlog", "in_progress", "review", "done"] as const;
 
@@ -178,6 +197,39 @@ async function createLinkedTask(
   links.tasks[tv.id] = { project_id: pid, status, source };
   saveLinks();
   return { ...tv, status: effectiveStatus(tv.done, links.tasks[tv.id]), source };
+}
+
+// Apply a partial update to a tracked task — shared by the manual task PATCH
+// endpoint and the sync pull path so both go through identical semantics.
+async function applyTaskUpdate(
+  tid: string,
+  b: { title?: string; notes?: string; due_date?: string; status?: string; done?: boolean },
+) {
+  const link = links.tasks[tid];
+  if (!link) throw new AnytypeError(404, "task not tracked");
+  const patch: any = {};
+  const props: Array<Record<string, any>> = [];
+  if (b.title !== undefined) patch.name = b.title;
+  if (b.notes !== undefined) patch.markdown = b.notes;
+  let newStatus = link.status;
+  if (b.done !== undefined || b.status !== undefined) {
+    const wantDone = b.done !== undefined ? !!b.done : b.status === "done";
+    props.push({ key: config.task_keys.done, checkbox: wantDone });
+    if (b.status !== undefined && STATUSES.includes(b.status as any)) newStatus = b.status as any;
+    else newStatus = wantDone ? "done" : link.status === "done" ? "in_progress" : link.status;
+    if (wantDone) newStatus = "done";
+  }
+  if (b.due_date !== undefined) {
+    props.push(b.due_date
+      ? { key: config.task_keys.due, date: b.due_date }
+      : { key: config.task_keys.due, date: "" });
+  }
+  if (props.length) patch.properties = props;
+  if (Object.keys(patch).length) await updateObject(config.space_id, tid, patch);
+  links.tasks[tid] = { ...link, status: newStatus };
+  saveLinks();
+  const tv2 = toTaskView(await getObject(config.space_id, tid), config.task_keys);
+  return { ...tv2, status: effectiveStatus(tv2.done, links.tasks[tid]), source: link.source };
 }
 
 const server = Bun.serve({
@@ -340,7 +392,7 @@ const server = Bun.serve({
           if (gate) return gate;
           const p = await hydrateProject(pl);
           if (!p) return json({ error: "project no longer exists in Anytype" }, 404);
-          return json({ project: p, tasks: await tasksFor(pid) });
+          return json({ project: p, tasks: await tasksFor(pid), clickup_binding: links.clickup.bindings[pid] || null });
         }
         if (method === "PATCH") {
           const gate = needSpace();
@@ -365,6 +417,14 @@ const server = Bun.serve({
           }
           for (const [aid, l] of Object.entries(links.wiki)) {
             if (l.project_id === pid) delete links.wiki[aid]; // articles stay in Anytype, unlinked
+          }
+          // ClickUp sync state for the project goes with it (the remote list is untouched)
+          delete links.clickup.bindings[pid];
+          for (const atId of Object.keys(links.clickup.sync)) {
+            if (!links.tasks[atId]) delete links.clickup.sync[atId];
+          }
+          for (const cid of Object.keys(links.clickup.tasks)) {
+            if (!links.tasks[links.clickup.tasks[cid]]) delete links.clickup.tasks[cid];
           }
           links.projects = links.projects.filter((p) => p.id !== pid);
           saveLinks();
@@ -421,29 +481,7 @@ const server = Bun.serve({
           const gate = needSpace();
           if (gate) return gate;
           const b = await readBody(req);
-          const patch: any = {};
-          const props: Array<Record<string, any>> = [];
-          if (b.title !== undefined) patch.name = b.title;
-          if (b.notes !== undefined) patch.markdown = b.notes;
-          let newStatus = link.status;
-          if (b.done !== undefined || b.status !== undefined) {
-            const wantDone = b.done !== undefined ? !!b.done : b.status === "done";
-            props.push({ key: config.task_keys.done, checkbox: wantDone });
-            if (b.status !== undefined && STATUSES.includes(b.status)) newStatus = b.status;
-            else newStatus = wantDone ? "done" : link.status === "done" ? "in_progress" : link.status;
-            if (wantDone) newStatus = "done";
-          }
-          if (b.due_date !== undefined) {
-            props.push(b.due_date
-              ? { key: config.task_keys.due, date: b.due_date }
-              : { key: config.task_keys.due, date: "" });
-          }
-          if (props.length) patch.properties = props;
-          if (Object.keys(patch).length) await updateObject(config.space_id, tid, patch);
-          links.tasks[tid] = { ...link, status: newStatus };
-          saveLinks();
-          const tv = toTaskView(await getObject(config.space_id, tid), config.task_keys);
-          return json({ task: { ...tv, status: effectiveStatus(tv.done, links.tasks[tid]), source: link.source } });
+          return json({ task: await applyTaskUpdate(tid, b) });
         }
         if (method === "DELETE") {
           const gate = needSpace();
@@ -542,13 +580,21 @@ const server = Bun.serve({
         }
       }
 
-      // ---------- ClickUp integration (one-way import: ClickUp → Ascent) ----------
+      // ---------- ClickUp integration (two-way sync: ClickUp ⇄ Ascent) ----------
       // The Personal API token lives only in gitignored data/links.json. It is
       // never returned by any GET, never logged, and every ClickUp call is
       // proxied through the server so the token never reaches the browser.
+      // Sync is MANUAL only (the ⇄ Sync button): there is no polling and no
+      // background writer, so nothing ever overwrites a task unprompted.
+      // Deletions are never synchronized — a mapped task missing on one side
+      // is reported and left alone on the other side.
       const cuToken = () => links.clickup.token;
       const needCu = (): Response | null =>
         cuToken() ? null : json({ error: "ClickUp not connected" }, 401);
+      // epoch-ms → "YYYY-MM-DD" (UTC); "" when unknown. Used to compare due
+      // dates across ClickUp (epoch-ms) and Anytype (date strings) snapshots.
+      const isoDay = (ms: number): string =>
+        ms > 0 ? new Date(ms).toISOString().slice(0, 10) : "";
 
       if (path === "/api/integrations/clickup/status" && method === "GET") {
         return json({ connected: !!cuToken() });
@@ -629,15 +675,273 @@ const server = Bun.serve({
             dueDate: t.dueDate != null ? String(t.dueDate) : t.due_date != null ? String(t.due_date) : null,
             priority: t.priority != null ? String(t.priority) : null,
             description: String(t.description ?? ""),
+            updatedMs: t.updatedMs != null && Number.isFinite(Number(t.updatedMs)) ? Number(t.updatedMs) : 0,
           };
           const draft = taskToDraft(cuTask);
           if (!draft.title.trim()) { skipped++; continue; }
           const task = await createLinkedTask(pid, draft, "ascent");
           links.clickup.tasks[cid] = task.id; // dedupe map survives restarts
+          // Seed the sync snapshot so the first manual sync sees the import
+          // as the baseline instead of a change on either side.
+          links.clickup.sync[task.id] = {
+            clickup_id: cid,
+            anytype_id: task.id,
+            clickup_updated: cuTask.updatedMs,
+            anytype_updated: task.updatedMs,
+            fields: {
+              name: draft.title.trim(),
+              desc: (draft.notes || "").trim(),
+              due: draft.due_date || "",
+              column: task.status,
+            },
+          };
           imported++;
+        }
+        // Importing from a list binds it to the project for future syncs
+        // (only if the project isn't already bound to another list).
+        if (imported > 0 && !links.clickup.bindings[pid]) {
+          try {
+            const info = await getListInfo(cuToken(), decodeURIComponent(cuImport[1]));
+            links.clickup.bindings[pid] = { list_id: info.id, list_name: info.name, last_sync: null };
+          } catch { /* binding is best-effort; the import already succeeded */ }
         }
         saveLinks();
         return json({ ok: true, imported, skipped }, 201);
+      }
+
+      // ---------- ClickUp two-way sync ----------
+      // Bind a list to a project WITHOUT importing tasks, so ⇄ Sync can be
+      // used on a project whose tasks were created in Ascent first.
+      const cuBind = path.match(/^\/api\/integrations\/clickup\/lists\/([^/]+)\/bind$/);
+      if (cuBind && method === "POST") {
+        const gate = needSpace();
+        if (gate) return gate;
+        const g = needCu();
+        if (g) return g;
+        const b = await readBody(req);
+        const pid = String(b.project_id || "");
+        if (!links.projects.some((p) => p.id === pid)) return json({ error: "project not tracked" }, 404);
+        const info = await getListInfo(cuToken(), decodeURIComponent(cuBind[1])); // also validates the list exists
+        const prev = links.clickup.bindings[pid];
+        if (prev && prev.list_id !== info.id) {
+          // Rebinding to a DIFFERENT list: drop stale per-project sync
+          // snapshots — they belong to the old list's task ids. A first-time
+          // bind keeps any snapshots (e.g. seeded by an earlier import).
+          for (const atId of Object.keys(links.clickup.sync)) {
+            const l = links.tasks[atId];
+            if (l && l.project_id === pid) delete links.clickup.sync[atId];
+          }
+        }
+        links.clickup.bindings[pid] = {
+          list_id: info.id,
+          list_name: info.name,
+          last_sync: prev && prev.list_id === info.id ? prev.last_sync : null,
+        };
+        saveLinks();
+        return json({ ok: true, binding: links.clickup.bindings[pid] });
+      }
+      if (path === "/api/integrations/clickup/bindings" && method === "GET") {
+        const g = needCu();
+        if (g) return g;
+        return json({ bindings: links.clickup.bindings }); // token is never included
+      }
+      const cuUnbind = path.match(/^\/api\/integrations\/clickup\/bindings\/([^/]+)$/);
+      if (cuUnbind && method === "DELETE") {
+        const g = needCu();
+        if (g) return g;
+        delete links.clickup.bindings[decodeURIComponent(cuUnbind[1])];
+        saveLinks();
+        return json({ ok: true });
+      }
+
+      // Manual two-way sync between a project and its bound ClickUp list.
+      // Change detection: ClickUp date_updated vs the snapshot; Anytype
+      // updated_at vs the snapshot (normalized field values as a fallback
+      // when Anytype carries no usable timestamp). Both changed →
+      // most-recent-wins; no Anytype timestamp → ClickUp wins. Deletions are
+      // never synced — a mapped task missing on one side is only reported.
+      if (path === "/api/integrations/clickup/sync" && method === "POST") {
+        const gate = needSpace();
+        if (gate) return gate;
+        const g = needCu();
+        if (g) return g;
+        const b = await readBody(req);
+        const pid = String(b.project_id || "");
+        if (!links.projects.some((p) => p.id === pid)) return json({ error: "project not tracked" }, 404);
+        const binding = links.clickup.bindings[pid];
+        if (!binding) return json({ error: "no ClickUp list bound to this project — link a list first" }, 400);
+        const token = cuToken();
+        const report = {
+          pulled: 0, pushed: 0, imported_new: 0, pushed_new: 0,
+          conflicts: 0, conflicts_cu_won: 0, conflicts_at_won: 0,
+          skipped: 0, gone_clickup: 0, gone_anytime: 0,
+        };
+        const cuFieldsOf = (t: CuTask): CuSyncFields => ({
+          name: t.name.trim(),
+          desc: t.description.trim(),
+          due: t.dueDate ? isoDay(Number(t.dueDate)) : "",
+          column: cuStatusToColumn(t.status, t.statusType),
+        });
+        const atFieldsOf = (t: { title: string; notes: string; dueMs: number; status: string }): CuSyncFields => ({
+          name: String(t.title || "").trim(),
+          desc: String(t.notes || "").trim(),
+          due: t.dueMs ? isoDay(t.dueMs) : "",
+          column: t.status,
+        });
+        const fieldsDiffer = (a: CuSyncFields, bb: CuSyncFields) =>
+          a.name !== bb.name || a.desc !== bb.desc || a.due !== bb.due || a.column !== bb.column;
+        // Refresh a sync snapshot from the current state of both sides.
+        const snapshotAt = async (atId: string, cuId: string, cuUpdated: number) => {
+          const tv = toTaskView(await getObject(config.space_id, atId), config.task_keys);
+          const link = links.tasks[atId];
+          links.clickup.sync[atId] = {
+            clickup_id: cuId,
+            anytype_id: atId,
+            clickup_updated: cuUpdated,
+            anytype_updated: tv.updatedMs,
+            fields: {
+              name: tv.title.trim(),
+              desc: String(tv.notes || "").trim(),
+              due: tv.dueMs ? isoDay(tv.dueMs) : "",
+              column: effectiveStatus(tv.done, link),
+            },
+          };
+        };
+        const [cuTasks, listInfo] = await Promise.all([
+          getListTasks(token, binding.list_id),
+          getListInfo(token, binding.list_id),
+        ]);
+        const statuses: CuStatus[] = listInfo.statuses;
+        const cuById = new Map(cuTasks.map((t) => [t.id, t]));
+        const atTasks = await tasksFor(pid);
+        const atById = new Map(atTasks.map((t) => [t.id, t]));
+        const syncMap = links.clickup.sync;
+        // Legacy (pre-sync) clickup_id → anytype_id entries belonging to this
+        // project with no snapshot yet: baseline them from the current state
+        // of both sides instead of duplicating tasks.
+        for (const [cid, atId] of Object.entries(links.clickup.tasks)) {
+          const l = links.tasks[atId];
+          if (!l || l.project_id !== pid || syncMap[atId]) continue;
+          const cu = cuById.get(cid);
+          const at = atById.get(atId);
+          if (!cu || !at) continue;
+          await snapshotAt(atId, cid, cu.updatedMs);
+          // no report increment here: the mapped-tasks loop below sees the
+          // fresh snapshot and counts it as skipped on its own pass.
+        }
+        const mappedCuIds = new Set<string>();
+        const mappedAtIds = new Set<string>();
+        for (const st of Object.values(syncMap)) {
+          const l = links.tasks[st.anytype_id];
+          if (l && l.project_id === pid) { mappedCuIds.add(st.clickup_id); mappedAtIds.add(st.anytype_id); }
+        }
+        for (const [cid, atId] of Object.entries(links.clickup.tasks)) {
+          const l = links.tasks[atId];
+          if (l && l.project_id === pid) { mappedCuIds.add(cid); mappedAtIds.add(atId); }
+        }
+        // --- mapped tasks: pull, push, or resolve conflicts ---
+        for (const st of Object.values(syncMap)) {
+          const link = links.tasks[st.anytype_id];
+          if (!link) {
+            // The Anytype task is gone (its link was pruned): drop the stale
+            // snapshot. The ClickUp task is left alone — never delete.
+            delete syncMap[st.anytype_id];
+            report.gone_anytime++;
+            continue;
+          }
+          if (link.project_id !== pid) continue;
+          const cu = cuById.get(st.clickup_id);
+          const at = atById.get(st.anytype_id);
+          if (!cu) { report.gone_clickup++; continue; } // deleted in ClickUp: leave the Anytype task alone
+          if (!at) { delete syncMap[st.anytype_id]; report.gone_anytime++; continue; } // deleted in Anytype
+          const cf = cuFieldsOf(cu);
+          const af = atFieldsOf(at);
+          const cuChanged = cu.updatedMs > st.clickup_updated;
+          const atChanged = at.updatedMs > st.anytype_updated || (at.updatedMs === 0 && fieldsDiffer(af, st.fields));
+          if (!cuChanged && !atChanged) { report.skipped++; continue; }
+          const pull = async () => {
+            const patch: { title?: string; notes?: string; due_date?: string; status?: string } = {};
+            if (cf.name !== af.name) patch.title = cu.name;
+            if (cf.desc !== af.desc) patch.notes = cu.description;
+            if (cf.due !== af.due) patch.due_date = cf.due;
+            if (cf.column !== af.column) patch.status = cf.column;
+            if (Object.keys(patch).length) await applyTaskUpdate(st.anytype_id, patch);
+            await snapshotAt(st.anytype_id, cu.id, cu.updatedMs);
+          };
+          const push = async () => {
+            const cuPatch: Record<string, any> = {};
+            if (af.name !== st.fields.name) cuPatch.name = at.title;
+            if (af.desc !== st.fields.desc) cuPatch.description = at.notes || "";
+            if (af.due !== st.fields.due) cuPatch.due_date = at.dueMs ? at.dueMs : null;
+            if (af.column !== st.fields.column) {
+              const cuStatus = columnToCuStatus(statuses, at.status);
+              if (cuStatus) cuPatch.status = cuStatus;
+            }
+            if (Object.keys(cuPatch).length) await updateCuTask(token, cu.id, cuPatch);
+            const fresh = await getCuTask(token, cu.id).catch(() => null);
+            links.clickup.sync[st.anytype_id] = {
+              clickup_id: cu.id,
+              anytype_id: st.anytype_id,
+              clickup_updated: fresh ? fresh.updatedMs : cu.updatedMs,
+              anytype_updated: at.updatedMs,
+              fields: af,
+            };
+          };
+          if (cuChanged && !atChanged) { await pull(); report.pulled++; continue; }
+          if (atChanged && !cuChanged) { await push(); report.pushed++; continue; }
+          report.conflicts++;
+          if (at.updatedMs === 0 || cu.updatedMs >= at.updatedMs) {
+            await pull(); report.conflicts_cu_won++;
+          } else {
+            await push(); report.conflicts_at_won++;
+          }
+        }
+        // --- unmapped ClickUp tasks → import as native Anytype tasks ---
+        for (const cu of cuTasks) {
+          if (mappedCuIds.has(cu.id)) continue;
+          const draft = taskToDraft(cu);
+          if (!draft.title.trim()) continue;
+          const task = await createLinkedTask(pid, draft, "ascent");
+          links.clickup.tasks[cu.id] = task.id;
+          links.clickup.sync[task.id] = {
+            clickup_id: cu.id,
+            anytype_id: task.id,
+            clickup_updated: cu.updatedMs,
+            anytype_updated: task.updatedMs,
+            fields: {
+              name: draft.title.trim(),
+              desc: (draft.notes || "").trim(),
+              due: draft.due_date || "",
+              column: task.status,
+            },
+          };
+          mappedCuIds.add(cu.id);
+          report.imported_new++;
+        }
+        // --- unmapped Anytype tasks in this project → create in ClickUp ---
+        for (const at of atTasks) {
+          if (mappedAtIds.has(at.id)) continue;
+          const cuStatus = columnToCuStatus(statuses, at.status);
+          const created = await createCuTask(token, binding.list_id, {
+            name: at.title,
+            description: at.notes || "",
+            due_date: at.dueMs ? at.dueMs : null,
+            status: cuStatus || undefined,
+          });
+          links.clickup.tasks[created.id] = at.id;
+          links.clickup.sync[at.id] = {
+            clickup_id: created.id,
+            anytype_id: at.id,
+            clickup_updated: created.updatedMs,
+            anytype_updated: at.updatedMs,
+            fields: atFieldsOf(at),
+          };
+          mappedAtIds.add(at.id);
+          report.pushed_new++;
+        }
+        binding.last_sync = new Date().toISOString();
+        saveLinks();
+        return json({ ok: true, report, binding });
       }
 
       // ---------- search (for import pickers) ----------

@@ -42,11 +42,21 @@ Task property keys (`done`, `due_date`) are **discovered at setup** via `GET /v1
 
 Already track work in Anytype? Use **Import** on the Projects page or inside a project to link existing pages/tasks instead of recreating them. Imported items are never deleted by Ascent — removing one only unlinks it. Items Ascent created itself *are* deleted in Anytype when you delete them here (with a confirmation).
 
-### ClickUp import (one-way: ClickUp → Ascent)
+### ClickUp import + two-way sync (manual ⇄ Sync)
 
 Coming from ClickUp? The task-import dialog has a second **ClickUp** tab next to Anytype. Paste a **Personal API token** (in ClickUp: your avatar → *Apps* → *Personal API token*) and browse workspace → space → folder/list → tasks, with a breadcrumb trail, select-all, and one-click import into the current project.
 
-The import is strictly **one-way**: ClickUp tasks become **native Anytype tasks** through the exact same creation path as manually added tasks (title, done checkbox, due date, markdown notes — the done/due property keys are the ones discovered at setup). Nothing ever flows back to ClickUp, and the token is **never returned to the browser** — `GET /api/integrations/clickup/status` only answers `{connected: true|false}`, and every ClickUp API call is proxied through the Ascent server.
+Imported tasks become **native Anytype tasks** through the exact same creation path as manually added tasks (title, done checkbox, due date, markdown notes — the done/due property keys are the ones discovered at setup). Importing from a list also **binds that list to the project**; or use **⛓ Link this list to the project** in the ClickUp task-list pane to bind a list *without* importing anything. A bound project shows a **⇄ Sync** button in the project view, with a "Last synced …" label next to it.
+
+**Sync is manual only** — there is no polling and no background writer. Pressing ⇄ Sync:
+
+- pulls ClickUp-side edits into Anytype, pushes Anytype-side edits to ClickUp (PUT), imports brand-new ClickUp tasks as native Anytype tasks, and creates brand-new Anytype tasks in the ClickUp list (POST);
+- resolves conflicts by **most-recent-wins** when both sides changed, and **ClickUp wins when Anytype carries no usable timestamp**;
+- **never synchronizes deletions** — a mapped task missing on one side is reported ("missing on one side — left alone") and untouched on the other;
+- reports a summary like `⇄ Sync: 3 pulled from ClickUp · 2 pushed · 1 conflict (ClickUp won)`;
+- maps statuses both ways: closed ClickUp statuses → `done`; `in_progress`/`review` by status-name hints; anything else → `backlog`, and the reverse picks the best-matching status of the bound list (falling back to the first open/closed status).
+
+The token is **never returned to the browser** — `GET /api/integrations/clickup/status` only answers `{connected: true|false}`, the binding endpoints return only `{list_id, list_name, last_sync}`, and every ClickUp API call is proxied through the Ascent server. Disconnecting clears the token but keeps bindings, mappings, and sync snapshots; deleting a project drops its binding and sync state without touching the remote list.
 
 The token lives only in the server-side `data/links.json` (gitignored, never committed). A `clickup_id → anytype_id` map in the same file **dedupes** imports: re-importing the same task skips it ("N imported, M already imported — skipped"), and the map survives disconnecting and reconnecting, so you can never double-import by accident.
 
@@ -118,7 +128,11 @@ GET    /api/integrations/clickup/spaces/:id/folders
 GET    /api/integrations/clickup/spaces/:id/lists
 GET    /api/integrations/clickup/folders/:id/lists
 GET    /api/integrations/clickup/lists/:id/tasks
-POST   /api/integrations/clickup/lists/:id/import {project_id, tasks} → native Anytype tasks, deduped by clickup_id
+POST   /api/integrations/clickup/lists/:id/import {project_id, tasks} → native Anytype tasks, deduped by clickup_id; binds the list to the project
+POST   /api/integrations/clickup/lists/:id/bind  {project_id} → bind a list without importing
+GET    /api/integrations/clickup/bindings        sanitized bindings (no token)
+DELETE /api/integrations/clickup/bindings/:project_id
+POST   /api/integrations/clickup/sync            {project_id} → manual two-way sync; returns {pulled, pushed, imported_new, pushed_new, conflicts, skipped, gone_clickup, gone_anytime}
 ```
 
 ## Troubleshooting

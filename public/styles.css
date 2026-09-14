@@ -600,3 +600,7 @@ body.drawer-open .scrim { opacity: 1; visibility: visible; transition: opacity 0
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+/* ClickUp sync affordance in the project topbar */
+.sync-wrap { display: inline-flex; align-items: center; gap: 8px; }
+.sync-sub { font-size: 12px; color: var(--muted-foreground); white-space: nowrap; }

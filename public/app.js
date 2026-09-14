@@ -421,6 +421,7 @@ function projectModal(existing) {
 function importModal(kind, projectId) {
   const isTask = kind === "task";
   const isWiki = kind === "wiki";
+  if (isTask) cuProjectId = projectId; // the ClickUp tab binds/imports into this project
   const anyPane = `<div class="search-row"><input id="imp-q" placeholder="Search your ${isTask ? "tasks" : "pages"} in Anytype…"><button class="btn btn-outline" id="imp-go">Search</button></div>
      <div id="imp-results" style="max-height:300px;overflow:auto"></div>
      <p style="font-size:12px;color:var(--muted-foreground)">Already-tracked items are hidden. Imported items keep living in Anytype — Ascent only links to them.</p>`;
@@ -470,12 +471,17 @@ function importModal(kind, projectId) {
   }
 }
 
-/* ---------- ClickUp import (one-way: ClickUp → Ascent) ----------
+/* ---------- ClickUp integration: one-way import + manual two-way sync ----------
    The token is pasted by the user and POSTed to the server, which stores it
    in gitignored data/links.json and proxies every ClickUp call. The browser
-   never sees the token again: status returns only a boolean. */
+   never sees the token again: status returns only a boolean.
+   A ClickUp list can be BOUND to a project (via "Link this list" or by
+   importing from it); the ⇄ Sync button in the project view then runs a
+   manual two-way sync with that list. There is no polling: nothing syncs
+   unless the user presses the button. */
 let cuTab = "any";
 let cu = null;
+let cuProjectId = null; // project the ClickUp tab currently imports/binds into
 function cuInit() {
   cu = { connected: false, trail: [], level: "", items: [], tasks: [], loading: false, error: "" };
 }
@@ -537,7 +543,12 @@ function cuPaneHtml() {
       <button class="btn btn-link btn-sm" id="cu-disconnect" style="color:var(--destructive);flex-shrink:0">Disconnect</button>
     </div>
     <div id="cu-items" style="max-height:300px;overflow:auto">${list}</div>
-    <p style="font-size:12px;color:var(--muted-foreground);margin:10px 0 0">Tasks are created as native Anytype tasks in this project. Re-importing skips tasks already imported.</p>`;
+    ${cu.level === "tasks" ? `
+    <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <button class="btn btn-outline btn-sm" id="cu-link-list">⛓ Link this list to the project</button>
+      <span style="font-size:12px;color:var(--muted-foreground)">…without importing, for ⇄ Sync</span>
+    </div>` : ""}
+    <p style="font-size:12px;color:var(--muted-foreground);margin:10px 0 0">Tasks are created as native Anytype tasks in this project. Re-importing skips tasks already imported. A linked list powers the ⇄ Sync button in the project view.</p>`;
 }
 function cuWirePane() {
   const conn = $("#cu-connect");
@@ -546,10 +557,25 @@ function cuWirePane() {
   if (tok && tok.addEventListener) tok.addEventListener("keydown", (e) => { if (e.key === "Enter") cuConnect(); });
   const dis = $("#cu-disconnect");
   if (dis) dis.onclick = cuDisconnect;
+  const linkBtn = $("#cu-link-list");
+  if (linkBtn) linkBtn.onclick = cuLinkList;
   $$("#imp-cu [data-cu-crumb]").forEach((b) => { b.onclick = () => cuCrumb(Number(b.dataset.cuCrumb)); });
   $$("#imp-cu [data-cu-open]").forEach((b) => { b.onclick = () => cuOpen(b.dataset.cuOpen, b.dataset.cuKind); });
   const all = $("#cu-all");
   if (all) all.onclick = () => { $$("#imp-cu .cu-task").forEach((c) => { c.checked = all.checked; }); };
+}
+/** Bind the browsed ClickUp list to the project without importing any tasks. */
+async function cuLinkList() {
+  const listCrumb = [...cu.trail].reverse().find((t) => t.kind === "list");
+  if (!listCrumb) { toast("Pick a ClickUp list first", true); return; }
+  if (!cuProjectId) { toast("Open this from a project first", true); return; }
+  try {
+    const { binding } = await POST(`/api/integrations/clickup/lists/${encodeURIComponent(listCrumb.id)}/bind`,
+      { project_id: cuProjectId });
+    $("#modal-root").innerHTML = "";
+    toast(`Linked to ClickUp list “${binding.list_name}” — use ⇄ Sync in the project view`);
+    route();
+  } catch (e) { toast(e.message, true); }
 }
 async function cuConnect() {
   const token = $("#cu-token").value.trim();
@@ -625,6 +651,42 @@ async function clickupImportSelected(projectId) {
     { project_id: projectId, tasks });
 }
 
+/** Compact, human-readable summary of a sync report for the toast. */
+function syncReportText(r) {
+  const bits = [];
+  if (r.pulled) bits.push(`${r.pulled} pulled from ClickUp`);
+  if (r.pushed) bits.push(`${r.pushed} pushed to ClickUp`);
+  if (r.imported_new) bits.push(`${r.imported_new} new from ClickUp`);
+  if (r.pushed_new) bits.push(`${r.pushed_new} new to ClickUp`);
+  if (r.conflicts) {
+    const winner = r.conflicts_cu_won && !r.conflicts_at_won ? "ClickUp"
+      : r.conflicts_at_won && !r.conflicts_cu_won ? "Ascent" : "newest";
+    bits.push(`${r.conflicts} conflict${r.conflicts > 1 ? "s" : ""} (${winner} won)`);
+  }
+  const gone = (r.gone_clickup || 0) + (r.gone_anytime || 0);
+  if (gone) bits.push(`${gone} missing on one side — left alone`);
+  return bits.length ? `⇄ Sync: ${bits.join(" · ")}` : "⇄ Sync complete — everything already in sync";
+}
+function fmtSyncTime(iso) {
+  const ms = Date.parse(iso);
+  if (!Number.isFinite(ms)) return iso;
+  return new Date(ms).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+/** Manual two-way sync with the project's bound ClickUp list. */
+async function syncNow(pid) {
+  const btn = $("#pd-sync"), sub = $("#pd-sync-sub");
+  if (btn) { btn.disabled = true; btn.textContent = "Syncing…"; }
+  try {
+    const { report } = await POST("/api/integrations/clickup/sync", { project_id: pid });
+    toast(syncReportText(report));
+    route(); // re-renders the board and the "Last synced" label
+  } catch (e) {
+    toast(e.message, true);
+    if (btn) { btn.disabled = false; btn.textContent = "⇄ Sync"; }
+    if (sub) sub.textContent = sub.textContent; // keep the previous label
+  }
+}
+
 /* ---------- project detail: kanban board + wiki ---------- */
 let boardTasks = [];
 let wikiArticles = [];
@@ -686,9 +748,11 @@ async function vProjectDetail(id, tab = "board") {
   if (!wikiArticles.some((a) => a.id === wikiSel)) { wikiSel = wikiArticles.length ? wikiArticles[0].id : null; wikiEditing = false; }
   const done = d.tasks.filter((t) => t.status === "done").length;
   setTitle(p.name, `${done}/${d.tasks.length} tasks · ${wikiArticles.length} wiki article${wikiArticles.length === 1 ? "" : "s"}`);
+  const binding = d.clickup_binding;
   setActions(tab === "wiki"
     ? `<button class="btn btn-outline btn-sm" id="pd-import-wiki">⇪ Import pages</button> <button class="btn btn-default btn-sm" id="pd-new-article">+ New article</button>`
     : `
+    ${binding ? `<span class="sync-wrap"><button class="btn btn-outline btn-sm" id="pd-sync" title="Sync with ClickUp list “${esc(binding.list_name)}”">⇄ Sync</button><span class="sync-sub" id="pd-sync-sub">${binding.last_sync ? "Last synced " + esc(fmtSyncTime(binding.last_sync)) : "Not synced yet"}</span></span>` : ""}
     <button class="btn btn-outline btn-sm" id="pd-import">⇪ Import tasks</button>
     <button class="btn btn-ghost btn-icon" id="pd-edit" title="Edit project">✎</button>
     <button class="btn btn-default btn-sm" id="pd-new-task">+ New task</button>`);
@@ -739,6 +803,8 @@ async function vProjectDetail(id, tab = "board") {
   $("#pd-new-task").onclick = () => taskModal(id);
   $("#pd-edit").onclick = () => projectModal(p);
   $("#pd-import").onclick = () => importModal("task", id);
+  const syncBtn = $("#pd-sync");
+  if (syncBtn) syncBtn.onclick = () => syncNow(id);
 }
 
 /* ---------- wiki ---------- */
@@ -1006,4 +1072,4 @@ initTheme();
 route();
 
 // test seam
-globalThis.__test = { taskCard, duePill, fmtDate, COLUMNS, md, vOverview, vProjects, vProjectDetail, vSetup, renderSetup, renderWikiList, renderWikiPane, selectArticle, openModal, projectModal, taskModal, importModal, initTheme, toggleTheme, paintThemeToggle, route, openDrawer, closeDrawer, toggleDrawer, isDrawerOpen, renderBoard, projectRemainingEst, projectEstRaw, estSizeForMins, timeHealthWidget, fetchProjectTasks, Estimate, cuTabOf: () => cuTab, cuState: () => cu, cuInit, cuShowTab, cuShowPane, cuPaneHtml, cuConnect, cuDisconnect, cuLoadTeams, cuOpen, cuCrumb, clickupImportSelected };
+globalThis.__test = { taskCard, duePill, fmtDate, COLUMNS, md, vOverview, vProjects, vProjectDetail, vSetup, renderSetup, renderWikiList, renderWikiPane, selectArticle, openModal, projectModal, taskModal, importModal, initTheme, toggleTheme, paintThemeToggle, route, openDrawer, closeDrawer, toggleDrawer, isDrawerOpen, renderBoard, projectRemainingEst, projectEstRaw, estSizeForMins, timeHealthWidget, fetchProjectTasks, Estimate, cuTabOf: () => cuTab, cuState: () => cu, cuInit, cuShowTab, cuShowPane, cuPaneHtml, cuConnect, cuDisconnect, cuLoadTeams, cuOpen, cuCrumb, clickupImportSelected, cuLinkList, cuProjectIdOf: () => cuProjectId, syncNow, syncReportText, fmtSyncTime };
