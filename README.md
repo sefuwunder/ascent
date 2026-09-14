@@ -62,6 +62,16 @@ On top of the design system, Ascent wears an **iOS-style skin**:
 - **Tasteful motion** — views fade-and-rise on navigation, dialogs spring in with the iOS easing (`cubic-bezier(0.32, 0.72, 0, 1)`), toasts slide up from the bottom edge, buttons press-scale, and project/task cards lift on hover. Everything is instant under `prefers-reduced-motion`.
 - **Responsive drawer** — at **≤900px** the sidebar collapses into an off-canvas drawer: opened by the ☰ button in the topbar, it slides in with the iOS spring, and closes via the blurred scrim, the ✕ button, `Esc`, or any navigation (focus moves into the drawer for keyboard users). On small screens the kanban becomes a horizontally scrollable snap list, the topbar condenses (truncated title, hidden subtitle), and dashboards go single-column.
 
+### Task-time estimator
+
+Ascent embeds a **tiny word-bag task-time estimator** (`public/estimate.js`, a few KB, zero dependencies, fully deterministic): a seed lexicon of ~150 common task words, each mapped to a typical duration range in minutes. A task title's estimate pools the ranges of its matched words (median of typicals for the point estimate, pooled lo–hi for the range), scaled by effort modifiers (`quick` ×0.5 … `comprehensive` ×1.6). Titles with no known words get no estimate rather than noise — e.g. "email steve" → ≈10m, "contact bill" → ≈20–40m, "research vision" → ≈60–80m.
+
+Estimates surface three ways, all styled with the Solarized accent palette and no animation:
+
+- a **⏱ chip** on every kanban task card, color-coded by t-shirt size (XS <15m cyan · S 15–30m green · M 30–60m yellow · L 1–2h orange · XL 2h+ red), with the full range in its tooltip;
+- the same chip inside the task modal, **updating live as you type the title**;
+- a **per-column total** (sum of point estimates, e.g. `≈3.5h`) in each kanban column header.
+
 ### API
 
 The Bun server exposes a small facade over Anytype:

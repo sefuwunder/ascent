@@ -476,7 +476,7 @@ async function vProjectDetail(id, tab = "board") {
     <div class="board" id="board">
       ${COLUMNS.map(([key, label, color]) => `
         <div class="kanban-col" data-col="${key}">
-          <div class="col-head"><span class="col-dot" style="background:${color}"></span>${label}<span class="col-count" id="count-${key}"></span></div>
+          <div class="col-head"><span class="col-dot" style="background:${color}"></span>${label}<span class="col-count" id="count-${key}"></span><span class="col-est" id="est-${key}"></span></div>
           <div class="col-body" data-col="${key}"></div>
         </div>`).join("")}
     </div>`;
@@ -610,7 +610,7 @@ function taskCard(t) {
       <div class="task-title ${t.status === "done" ? "done" : ""}">${esc(t.title)}</div>
     </div>
     ${t.notes ? `<div class="task-notes">${esc(t.notes)}</div>` : ""}
-    <div class="task-meta">${duePill(t)}${t.source === "imported" ? `<span class="badge badge-outline">imported</span>` : ""}</div>`;
+    <div class="task-meta">${Estimate.estChip(t.title)}${duePill(t)}${t.source === "imported" ? `<span class="badge badge-outline">imported</span>` : ""}</div>`;
   el.querySelector("[data-check]").onclick = async (e) => {
     e.stopPropagation();
     try {
@@ -639,6 +639,8 @@ function renderBoard() {
     body.innerHTML = "";
     items.forEach((t) => body.appendChild(taskCard(t)));
     $(`#count-${key}`).textContent = items.length;
+    const estEl = $(`#est-${key}`);
+    if (estEl) estEl.textContent = Estimate.colTotal(items);
   }
   $$(".kanban-col").forEach((col) => {
     col.ondragover = (e) => { e.preventDefault(); col.classList.add("dragover"); };
@@ -670,6 +672,7 @@ function taskModal(pid, existing) {
   const t = existing || {};
   openModal(existing ? "Edit task" : "New task", `
     ${field("Title", input("title", t.title || ""))}
+    <div id="m-est-wrap" style="margin:-6px 0 10px;min-height:1.6em">${Estimate.estChip(t.title || "")}</div>
     <div class="formgrid">
       ${field("Status", select("status", COLUMNS.map(([v, l]) => [v, l]), t.status || "backlog"))}
       ${field("Due date", input("due_date", isoDate(t.dueMs), "date"))}
@@ -696,6 +699,12 @@ function taskModal(pid, existing) {
       if (p) setTitle(p.project.name, `${p.tasks.filter((x) => x.status === "done").length}/${p.tasks.length} tasks complete`);
     }, existing ? "Save changes" : "Create task");
   const del = $("#m-delete");
+  const root = $("#modal-root");
+  const ti0 = root.querySelector('[name="title"]');
+  if (ti0 && ti0.addEventListener) ti0.addEventListener("input", () => {
+    const w = $("#m-est-wrap");
+    if (w) w.innerHTML = Estimate.estChip(ti0.value);
+  });
   if (del) del.onclick = async () => {
     if (!confirm(`Delete “${existing.title}”?`)) return;
     try {
@@ -743,4 +752,4 @@ initTheme();
 route();
 
 // test seam
-globalThis.__test = { taskCard, duePill, fmtDate, COLUMNS, md, vOverview, vProjects, vProjectDetail, vSetup, renderSetup, renderWikiList, renderWikiPane, selectArticle, openModal, projectModal, taskModal, importModal, initTheme, toggleTheme, paintThemeToggle, route, openDrawer, closeDrawer, toggleDrawer, isDrawerOpen };
+globalThis.__test = { taskCard, duePill, fmtDate, COLUMNS, md, vOverview, vProjects, vProjectDetail, vSetup, renderSetup, renderWikiList, renderWikiPane, selectArticle, openModal, projectModal, taskModal, importModal, initTheme, toggleTheme, paintThemeToggle, route, openDrawer, closeDrawer, toggleDrawer, isDrawerOpen, renderBoard, Estimate };
