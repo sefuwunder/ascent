@@ -1,6 +1,6 @@
 # ◭ Ascent
 
-Simple & elegant glossy project management with **Anytype as the data backend**. Every project is a native Anytype page, every task a native Anytype task — created, read, updated and deleted through the official local API (`2025-11-08`). Your data never leaves your machine.
+Simple & elegant glossy project management with **Anytype as the data backend**. Every project is a native Anytype page, every task a native Anytype task, every wiki article a native Anytype page — created, read, updated and deleted through the official local API (`2025-11-08`). Your data never leaves your machine.
 
 Bun + zero npm dependencies. Runs on port **3004**.
 
@@ -29,7 +29,9 @@ ANYTYPE_API_KEY=... bun src/server.ts   # key from Anytype → Settings → API 
 |---|---|
 | Project | `page` object (name, icon, markdown description) |
 | Task | `task` object (title, done checkbox, due date, markdown notes) |
+| Wiki article | `page` object (title, markdown body) |
 | Project ↔ task link | `data/links.json` (local index only) |
+| Project ↔ article link | `data/links.json` (local index only) |
 | Kanban column | `data/links.json` (`backlog` / `in_progress` / `review` / `done`) |
 
 All *content* lives in your Anytype space. The local `data/` directory (gitignored) holds only the API key, the chosen space, and the link index — which project each task belongs to and which board column it's in. Checking a task done in Ascent checks it done in Anytype, and vice versa.
@@ -39,6 +41,10 @@ Task property keys (`done`, `due_date`) are **discovered at setup** via `GET /v1
 ### Import, don't duplicate
 
 Already track work in Anytype? Use **Import** on the Projects page or inside a project to link existing pages/tasks instead of recreating them. Imported items are never deleted by Ascent — removing one only unlinks it. Items Ascent created itself *are* deleted in Anytype when you delete them here (with a confirmation).
+
+### Project wiki
+
+Each project has a **Wiki** tab next to its kanban board: a lightweight knowledge base of markdown articles (runbooks, specs, meeting notes) stored as native Anytype pages, so they're searchable and editable in Anytype itself. Articles render headings, lists, code blocks, quotes, links and inline formatting; the editor is plain markdown. You can also import existing Anytype pages into a project's wiki — same rule as tasks: imported pages are unlinked, never deleted.
 
 ### API
 
@@ -59,6 +65,10 @@ GET    /api/projects/:id/tasks
 POST   /api/projects/:id/tasks        {title, notes, due_date, status} → Anytype task
 POST   /api/projects/:id/tasks/import {object_ids}
 PATCH/DELETE /api/tasks/:id  {title?, done?, due_date?, notes?, status?}
+GET    /api/projects/:id/wiki     wiki articles for a project
+POST   /api/projects/:id/wiki     {title, body} → Anytype page
+POST   /api/projects/:id/wiki/import {object_ids}
+GET/PATCH/DELETE /api/wiki/:id    {title?, body?}
 GET    /api/search?q=&kind=task|page  import picker
 ```
 

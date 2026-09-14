@@ -287,6 +287,24 @@ export function toTaskView(o: any, keys: TaskKeys): TaskView {
   };
 }
 
+export interface ArticleView {
+  id: string;
+  title: string;
+  body: string; // full markdown
+  updatedMs: number;
+}
+
+export function toArticleView(o: any): ArticleView {
+  const bodyRaw = o.markdown ?? o.body ?? o.snippet ?? o.description ?? "";
+  const body = typeof bodyRaw === "string" ? bodyRaw : String(bodyRaw ?? "");
+  return {
+    id: String(o.id),
+    title: String(o.name || o.title || "Untitled article"),
+    body,
+    updatedMs: asMs(o.updated_at || o.updatedAt || o.last_modified_date),
+  };
+}
+
 export interface ProjectView {
   id: string;
   name: string;

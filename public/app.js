@@ -288,7 +288,8 @@ function projectModal(existing) {
 
 function importModal(kind, projectId) {
   const isTask = kind === "task";
-  openModal(isTask ? "Import tasks" : "Import project",
+  const isWiki = kind === "wiki";
+  openModal(isTask ? "Import tasks" : isWiki ? "Import wiki pages" : "Import project",
     `<div class="search-row"><input id="imp-q" placeholder="Search your ${isTask ? "tasks" : "pages"} in Anytype…"><button class="btn" id="imp-go">Search</button></div>
      <div id="imp-results" style="max-height:300px;overflow:auto"></div>
      <p style="font-size:12px;color:var(--faint)">Already-tracked items are hidden. Imported items keep living in Anytype — Ascent only links to them.</p>`,
@@ -296,6 +297,7 @@ function importModal(kind, projectId) {
       const ids = $$("#imp-results input[type=checkbox]:checked").map((c) => c.value);
       if (!ids.length) { toast("Select at least one item", true); return; }
       if (isTask) await POST(`/api/projects/${projectId}/tasks/import`, { object_ids: ids });
+      else if (isWiki) await POST(`/api/projects/${projectId}/wiki/import`, { object_ids: ids });
       else for (const id of ids) await POST("/api/projects/import", { object_id: id });
       close();
       toast(`Imported ${ids.length} item${ids.length > 1 ? "s" : ""}`);
@@ -316,10 +318,53 @@ function importModal(kind, projectId) {
   run();
 }
 
-/* ---------- project detail + kanban ---------- */
+/* ---------- project detail: kanban board + wiki ---------- */
 let boardTasks = [];
+let wikiArticles = [];
+let wikiSel = null;
+let wikiFull = {};
+let wikiEditing = false;
 
-async function vProjectDetail(id) {
+/* tiny dependency-free markdown renderer (headings, lists, code, links, quotes) */
+function md(src) {
+  let t = esc(src || "");
+  const blocks = [];
+  t = t.replace(/```([\s\S]*?)```/g, (_m, c) => {
+    blocks.push(`<pre><code>${c.replace(/^\n+|\n+$/g, "")}</code></pre>`);
+    return `\u0000${blocks.length - 1}\u0000`;
+  });
+  const inline = (s) =>
+    s.replace(/`([^`]+)`/g, "<code>$1</code>")
+      .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+      .replace(/(^|[^*\n])\*([^*\n]+)\*/g, "$1<em>$2</em>")
+      .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  const lines = t.split("\n");
+  const out = [];
+  let list = null;
+  const closeList = () => { if (list) { out.push(`</${list}>`); list = null; } };
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (/^\u0000\d+\u0000$/.test(trimmed)) { closeList(); out.push(trimmed); continue; }
+    const h = trimmed.match(/^(#{1,3})\s+(.+)$/);
+    if (h) { closeList(); out.push(`<h${h[1].length}>${inline(h[2])}</h${h[1].length}>`); continue; }
+    if (/^---+$/.test(trimmed)) { closeList(); out.push("<hr>"); continue; }
+    if (trimmed.startsWith("&gt;")) { closeList(); out.push(`<blockquote>${inline(trimmed.slice(4).trim())}</blockquote>`); continue; }
+    const ul = trimmed.match(/^[-*]\s+(.+)$/);
+    const ol = trimmed.match(/^\d+\.\s+(.+)$/);
+    if (ul || ol) {
+      const tag = ul ? "ul" : "ol";
+      if (list !== tag) { closeList(); out.push(`<${tag}>`); list = tag; }
+      out.push(`<li>${inline((ul || ol)[1])}</li>`);
+      continue;
+    }
+    closeList();
+    if (trimmed) out.push(`<p>${inline(trimmed)}</p>`);
+  }
+  closeList();
+  return out.join("\n").replace(/\u0000(\d+)\u0000/g, (_m, i) => blocks[Number(i)] ?? "");
+}
+
+async function vProjectDetail(id, tab = "board") {
   const st = await GET("/api/status").catch(() => ({}));
   showChrome(true, st.space_name || "");
   setNav("projects");
@@ -329,9 +374,14 @@ async function vProjectDetail(id) {
   catch (e) { view.innerHTML = `<div class="empty"><span class="big">⚠</span>${esc(e.message)}<br><br><a class="btn" href="#/projects">Back to projects</a></div>`; return; }
   const p = d.project;
   boardTasks = d.tasks;
+  try { wikiArticles = (await GET(`/api/projects/${id}/wiki`)).articles; }
+  catch (e) { wikiArticles = []; }
+  if (!wikiArticles.some((a) => a.id === wikiSel)) { wikiSel = wikiArticles.length ? wikiArticles[0].id : null; wikiEditing = false; }
   const done = d.tasks.filter((t) => t.status === "done").length;
-  setTitle(p.name, `${done}/${d.tasks.length} tasks complete`);
-  setActions(`
+  setTitle(p.name, `${done}/${d.tasks.length} tasks · ${wikiArticles.length} wiki article${wikiArticles.length === 1 ? "" : "s"}`);
+  setActions(tab === "wiki"
+    ? `<button class="btn" id="pd-import-wiki">⇪ Import pages</button> <button class="btn primary" id="pd-new-article">+ New article</button>`
+    : `
     <button class="btn" id="pd-import">⇪ Import tasks</button>
     <button class="btn" id="pd-edit">Edit</button>
     <button class="btn primary" id="pd-new-task">+ New task</button>`);
@@ -350,6 +400,26 @@ async function vProjectDetail(id) {
         </div>
       </div>
     </div>
+    <div class="tabs">
+      <a class="tab ${tab === "board" ? "on" : ""}" href="#/projects/${id}">▦ Board</a>
+      <a class="tab ${tab === "wiki" ? "on" : ""}" href="#/projects/${id}/wiki">📚 Wiki <span class="col-count">${wikiArticles.length}</span></a>
+    </div>
+    <div id="tab-body"></div>`;
+
+  if (tab === "wiki") {
+    $("#tab-body").innerHTML = `
+      <div class="wiki">
+        <aside class="wiki-list panel"><div id="wk-items"></div></aside>
+        <div class="wiki-pane panel" id="wk-pane"></div>
+      </div>`;
+    renderWikiList();
+    renderWikiPane();
+    $("#pd-new-article").onclick = () => articleModal(id);
+    $("#pd-import-wiki").onclick = () => importModal("wiki", id);
+    return;
+  }
+
+  $("#tab-body").innerHTML = `
     <div class="board" id="board">
       ${COLUMNS.map(([key, label, color]) => `
         <div class="kanban-col" data-col="${key}">
@@ -362,6 +432,118 @@ async function vProjectDetail(id) {
   $("#pd-new-task").onclick = () => taskModal(id);
   $("#pd-edit").onclick = () => projectModal(p);
   $("#pd-import").onclick = () => importModal("task", id);
+}
+
+/* ---------- wiki ---------- */
+function renderWikiList() {
+  const box = $("#wk-items");
+  if (!box) return;
+  box.innerHTML = wikiArticles.length ? wikiArticles.map((a) => `
+    <div class="wiki-item ${a.id === wikiSel ? "on" : ""}" data-wk="${esc(a.id)}">
+      <div class="wk-title">${esc(a.title)}</div>
+      ${a.snippet ? `<div class="wk-snip">${esc(a.snippet)}</div>` : ""}
+      ${a.source === "imported" ? `<span class="pill imported">imported</span>` : ""}
+    </div>`).join("")
+    : `<div class="empty" style="padding:24px 12px">No articles yet.<br>Write the first page of this project's wiki.</div>`;
+  $$("#wk-items [data-wk]").forEach((el) => { el.onclick = () => selectArticle(el.dataset.wk); });
+}
+
+async function selectArticle(aid) {
+  wikiSel = aid;
+  wikiEditing = false;
+  renderWikiList();
+  const pane = $("#wk-pane");
+  if (!wikiFull[aid]) {
+    if (pane) pane.innerHTML = `<div class="empty"><span class="big">◌</span>Loading article…</div>`;
+    try { wikiFull[aid] = (await GET(`/api/wiki/${aid}`)).article; }
+    catch (e) {
+      wikiArticles = wikiArticles.filter((a) => a.id !== aid);
+      wikiSel = wikiArticles.length ? wikiArticles[0].id : null;
+      renderWikiList(); renderWikiPane();
+      toast(e.message, true);
+      return;
+    }
+  }
+  renderWikiPane();
+}
+
+function renderWikiPane() {
+  const pane = $("#wk-pane");
+  if (!pane) return;
+  const a = wikiFull[wikiSel];
+  if (!a) {
+    pane.innerHTML = `<div class="empty"><span class="big">📚</span>${wikiArticles.length ? "Select an article to read." : "No articles yet — create one with <b>+ New article</b>."}</div>`;
+    return;
+  }
+  if (wikiEditing) {
+    pane.innerHTML = `
+      ${field("Title", input("wk-title", a.title))}
+      ${field("Body (markdown)", `<textarea id="wk-body" rows="18">${esc(a.body)}</textarea>`)}
+      <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:14px">
+        <button class="btn ghost" id="wk-cancel">Cancel</button>
+        <button class="btn primary" id="wk-save">Save to Anytype</button>
+      </div>`;
+    $("#wk-cancel").onclick = () => { wikiEditing = false; renderWikiPane(); };
+    $("#wk-save").onclick = async () => {
+      const title = $("[name=wk-title]").value;
+      const body = $("#wk-body").value;
+      if (!title.trim()) { toast("Article title is required", true); return; }
+      try {
+        const { article } = await PATCH(`/api/wiki/${a.id}`, { title, body });
+        wikiFull[a.id] = article;
+        const li = wikiArticles.find((x) => x.id === a.id);
+        if (li) { li.title = article.title; li.updatedMs = article.updatedMs; li.snippet = (article.body || "").slice(0, 140); }
+        wikiEditing = false;
+        toast("Article saved to Anytype");
+        renderWikiList(); renderWikiPane();
+      } catch (e) { toast(e.message, true); }
+    };
+    return;
+  }
+  pane.innerHTML = `
+    <div class="wiki-read-head">
+      <h2>${esc(a.title)}</h2>
+      <button class="btn small" id="wk-edit">Edit</button>
+      <button class="btn small danger" id="wk-del">Delete</button>
+    </div>
+    ${a.source === "imported" ? `<div class="wk-imported-note">Imported from Anytype — deleting only unlinks it here; the page itself stays in Anytype.</div>` : ""}
+    <div class="markdown">${a.body && a.body.trim() ? md(a.body) : `<div class="empty" style="padding:20px">This article is empty — hit <b>Edit</b> to write it.</div>`}</div>`;
+  $("#wk-edit").onclick = () => { wikiEditing = true; renderWikiPane(); };
+  $("#wk-del").onclick = () => deleteArticle();
+}
+
+function articleModal(pid) {
+  openModal("New article", `
+    ${field("Title", input("title", ""))}
+    ${field("Body (markdown)", `<textarea name="body" rows="10" placeholder="# Heading&#10;&#10;Write the article in markdown…"></textarea>`)}
+    <div style="font-size:12px;color:var(--faint);margin-top:10px">Saved as a native Anytype page, linked to this project.</div>`,
+    async (d, close) => {
+      if (!d.title.trim()) { toast("Article title is required", true); return; }
+      const { article } = await POST(`/api/projects/${pid}/wiki`, { title: d.title, body: d.body });
+      wikiFull[article.id] = article;
+      wikiArticles.unshift({ id: article.id, title: article.title, updatedMs: article.updatedMs, source: "ascent", snippet: (article.body || "").slice(0, 140) });
+      wikiSel = article.id;
+      wikiEditing = false;
+      close();
+      toast("Article created in Anytype");
+      renderWikiList(); renderWikiPane();
+    }, "Create article");
+}
+
+async function deleteArticle() {
+  const a = wikiFull[wikiSel];
+  if (!a) return;
+  const imported = a.source === "imported";
+  if (!confirm(`Delete “${a.title}”?${imported ? " The page stays in Anytype — only the link is removed." : " The page is removed from Anytype."}`)) return;
+  try {
+    await DEL(`/api/wiki/${wikiSel}`);
+    delete wikiFull[wikiSel];
+    wikiArticles = wikiArticles.filter((x) => x.id !== wikiSel);
+    wikiSel = wikiArticles.length ? wikiArticles[0].id : null;
+    wikiEditing = false;
+    toast(imported ? "Article unlinked" : "Article deleted from Anytype");
+    renderWikiList(); renderWikiPane();
+  } catch (e) { toast(e.message, true); }
 }
 
 function taskCard(t) {
@@ -479,10 +661,12 @@ async function route() {
   const st = await GET("/api/status").catch(() => ({ paired: false, has_space: false }));
   if ((!st.paired || !st.has_space) && h !== "#/setup") { location.hash = "#/setup"; return; }
   const pm = h.match(/^#\/projects\/([^/]+)$/);
+  const pw = h.match(/^#\/projects\/([^/]+)\/wiki$/);
   try {
     if (h === "#/setup") await vSetup();
     else if (h === "#/overview") await vOverview();
     else if (h === "#/projects") await vProjects();
+    else if (pw) { _pid = pw[1]; await vProjectDetail(pw[1], "wiki"); }
     else if (pm) { _pid = pm[1]; await vProjectDetail(pm[1]); }
     else location.hash = "#/overview";
   } catch (e) {
@@ -493,4 +677,4 @@ window.addEventListener("hashchange", route);
 route();
 
 // test seam
-globalThis.__test = { taskCard, duePill, fmtDate, COLUMNS };
+globalThis.__test = { taskCard, duePill, fmtDate, COLUMNS, md };

@@ -1,13 +1,13 @@
 // Ascent — glossy project management over the Anytype local API.
-// Bun + zero dependencies. All project/task content lives in the user's
-// Anytype space; data/links.json only remembers which task belongs to which
-// project (and each card's kanban column), plus the pairing config.
+// Bun + zero dependencies. All project/task/article content lives in the user's
+// Anytype space; data/links.json only remembers which task/article belongs to
+// which project (and each card's kanban column), plus the pairing config.
 
 import {
   setApiKey, getApiKey, baseUrl, AnytypeError,
   createChallenge, exchangeCode, listSpaces, listProperties, discoverTaskKeys,
   searchSpace, createObject, getObject, updateObject, deleteObject,
-  toTaskView, toProjectView, type TaskKeys,
+  toTaskView, toProjectView, toArticleView, type TaskKeys,
 } from "./anytype";
 
 const PORT = Number(process.env.PORT || 3004);
@@ -23,7 +23,8 @@ interface Config {
 }
 interface TaskLink { project_id: string; status: string; source: "ascent" | "imported" }
 interface ProjectLink { id: string; source: "ascent" | "imported"; added_at: string }
-interface Links { projects: ProjectLink[]; tasks: Record<string, TaskLink> }
+interface WikiLink { project_id: string; source: "ascent" | "imported"; added_at: string }
+interface Links { projects: ProjectLink[]; tasks: Record<string, TaskLink>; wiki: Record<string, WikiLink> }
 
 function loadJson<T>(path: string, fallback: T): T {
   try {
@@ -38,11 +39,12 @@ function saveJson(path: string, v: unknown) {
 }
 
 let config: Config = loadJson<Config>(CONFIG_PATH, { api_key: "", space_id: "", space_name: "", task_keys: { done: "done", due: "due_date" } });
-let links: Links = loadJson<Links>(LINKS_PATH, { projects: [], tasks: {} });
+let links: Links = loadJson<Links>(LINKS_PATH, { projects: [], tasks: {}, wiki: {} });
 if (config.api_key) setApiKey(config.api_key);
 
 const saveConfig = () => saveJson(CONFIG_PATH, config);
 const saveLinks = () => saveJson(LINKS_PATH, links);
+if (!links.wiki) { links.wiki = {}; saveLinks(); } // upgrade path for pre-wiki link indexes
 
 const STATUSES = ["backlog", "in_progress", "review", "done"] as const;
 
@@ -115,6 +117,32 @@ async function tasksFor(projectId: string): Promise<any[]> {
   return out;
 }
 
+async function wikiFor(projectId: string): Promise<any[]> {
+  const ids = Object.entries(links.wiki)
+    .filter(([, l]) => l.project_id === projectId)
+    .map(([id]) => id);
+  const out: any[] = [];
+  let pruned = false;
+  for (const id of ids) {
+    try {
+      const o = await getObject(config.space_id, id);
+      const av = toArticleView(o);
+      const link = links.wiki[id];
+      out.push({ id: av.id, title: av.title, updatedMs: av.updatedMs, source: link.source,
+        snippet: av.body.slice(0, 140) });
+    } catch (e) {
+      // prune only genuine deletions — a bad key or outage must never wipe links
+      if (e instanceof AnytypeError && e.status === 404) {
+        delete links.wiki[id];
+        pruned = true;
+      }
+    }
+  }
+  if (pruned) saveLinks();
+  out.sort((a, b) => b.updatedMs - a.updatedMs);
+  return out;
+}
+
 const server = Bun.serve({
   port: PORT,
   async fetch(req) {
@@ -174,7 +202,7 @@ const server = Bun.serve({
       }
       if (path === "/api/disconnect" && method === "POST") {
         config = { api_key: "", space_id: "", space_name: "", task_keys: { done: "done", due: "due_date" } };
-        links = { projects: [], tasks: {} };
+        links = { projects: [], tasks: {}, wiki: {} };
         setApiKey("");
         saveConfig();
         saveLinks();
@@ -298,6 +326,9 @@ const server = Bun.serve({
           for (const [tid, l] of Object.entries(links.tasks)) {
             if (l.project_id === pid) delete links.tasks[tid]; // tasks stay in Anytype, unlinked
           }
+          for (const [aid, l] of Object.entries(links.wiki)) {
+            if (l.project_id === pid) delete links.wiki[aid]; // articles stay in Anytype, unlinked
+          }
           links.projects = links.projects.filter((p) => p.id !== pid);
           saveLinks();
           return json({ ok: true });
@@ -400,6 +431,91 @@ const server = Bun.serve({
         }
       }
 
+      // ---------- wiki ----------
+      const wikiListMatch = path.match(/^\/api\/projects\/([^/]+)\/wiki$/);
+      if (wikiListMatch && (method === "GET" || method === "POST")) {
+        const pid = wikiListMatch[1];
+        const gate = needSpace();
+        if (gate) return gate;
+        if (!links.projects.some((p) => p.id === pid)) return json({ error: "project not tracked" }, 404);
+        if (method === "GET") {
+          return json({ articles: await wikiFor(pid) });
+        }
+        const b = await readBody(req);
+        if (!b.title?.trim()) return json({ error: "article title is required" }, 400);
+        const o = await createObject(config.space_id, {
+          name: b.title.trim(),
+          type_key: "page",
+          body: b.body || "",
+          icon: "📄",
+        });
+        const av = toArticleView(o);
+        links.wiki[av.id] = { project_id: pid, source: "ascent", added_at: new Date().toISOString() };
+        saveLinks();
+        return json({ article: { ...av, source: "ascent" } }, 201);
+      }
+      const wikiImpMatch = path.match(/^\/api\/projects\/([^/]+)\/wiki\/import$/);
+      if (wikiImpMatch && method === "POST") {
+        const gate = needSpace();
+        if (gate) return gate;
+        const pid = wikiImpMatch[1];
+        if (!links.projects.some((p) => p.id === pid)) return json({ error: "project not tracked" }, 404);
+        const b = await readBody(req);
+        const ids: string[] = Array.isArray(b.object_ids) ? b.object_ids : [];
+        let added = 0;
+        for (const id of ids) {
+          if (links.wiki[id] || links.tasks[id] || links.projects.some((p) => p.id === id)) continue;
+          try {
+            await getObject(config.space_id, id); // 404s if unknown
+            links.wiki[id] = { project_id: pid, source: "imported", added_at: new Date().toISOString() };
+            added++;
+          } catch { /* skip unreadable */ }
+        }
+        saveLinks();
+        return json({ ok: true, added }, 201);
+      }
+      const wikiMatch = path.match(/^\/api\/wiki\/([^/]+)$/);
+      if (wikiMatch) {
+        const aid = wikiMatch[1];
+        const link = links.wiki[aid];
+        if (!link) return json({ error: "article not tracked" }, 404);
+        if (method === "GET") {
+          const gate = needSpace();
+          if (gate) return gate;
+          try {
+            const av = toArticleView(await getObject(config.space_id, aid));
+            return json({ article: { ...av, source: link.source } });
+          } catch (e) {
+            if (e instanceof AnytypeError && e.status === 404) {
+              delete links.wiki[aid];
+              saveLinks();
+            }
+            throw e;
+          }
+        }
+        if (method === "PATCH") {
+          const gate = needSpace();
+          if (gate) return gate;
+          const b = await readBody(req);
+          const patch: any = {};
+          if (b.title !== undefined) patch.name = b.title;
+          if (b.body !== undefined) patch.markdown = b.body;
+          if (Object.keys(patch).length) await updateObject(config.space_id, aid, patch);
+          const av = toArticleView(await getObject(config.space_id, aid));
+          return json({ article: { ...av, source: link.source } });
+        }
+        if (method === "DELETE") {
+          const gate = needSpace();
+          if (gate) return gate;
+          if (link.source === "ascent") {
+            try { await deleteObject(config.space_id, aid); } catch { /* already gone */ }
+          }
+          delete links.wiki[aid];
+          saveLinks();
+          return json({ ok: true });
+        }
+      }
+
       // ---------- search (for import pickers) ----------
       if (path === "/api/search" && method === "GET") {
         const gate = needSpace();
@@ -410,6 +526,7 @@ const server = Bun.serve({
         const linkedIds = new Set([
           ...links.projects.map((p) => p.id),
           ...Object.keys(links.tasks),
+          ...Object.keys(links.wiki),
         ]);
         const items = objs
           .filter((o) => o.id && !linkedIds.has(String(o.id)))
