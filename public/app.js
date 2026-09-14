@@ -60,10 +60,10 @@ const select = (name, options, val = "") =>
   `<select name="${name}">${options.map(([v, l]) => `<option value="${esc(v)}" ${String(v) === String(val) ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
 
 const COLUMNS = [
-  ["backlog", "Backlog", "#71717a"],
-  ["in_progress", "In progress", "#3b82f6"],
-  ["review", "Review", "#d97706"],
-  ["done", "Done", "#2a9d90"],
+  ["backlog", "Backlog", "var(--muted-foreground)"],
+  ["in_progress", "In progress", "var(--sol-blue)"],
+  ["review", "Review", "var(--sol-orange)"],
+  ["done", "Done", "var(--sol-cyan)"],
 ];
 const colName = (s) => (COLUMNS.find((c) => c[0] === s) || [])[1] || s;
 
@@ -93,6 +93,36 @@ function setTitle(t, sub = "") {
   document.title = `${t} — Ascent`;
 }
 function setActions(html) { $("#topbar-actions").innerHTML = html; }
+
+/* ---------- Solarized day/night theme ---------- */
+const THEME_KEY = "ascent-theme";
+function paintThemeToggle() {
+  const btn = $("#theme-toggle");
+  if (!btn) return;
+  const dark = document.documentElement.dataset.theme === "solarized-dark";
+  btn.textContent = dark ? "☀" : "☾";
+  btn.setAttribute("aria-label", dark ? "Switch to light theme" : "Switch to dark theme");
+  btn.title = dark ? "Light theme" : "Dark theme";
+}
+function initTheme() {
+  const el = document.documentElement;
+  if (el.dataset.theme !== "solarized-dark" && el.dataset.theme !== "solarized-light") {
+    let t = null;
+    try { t = localStorage.getItem(THEME_KEY); } catch (e) {}
+    if (t !== "solarized-dark" && t !== "solarized-light") {
+      t = (typeof matchMedia === "function" && matchMedia("(prefers-color-scheme: dark)").matches)
+        ? "solarized-dark" : "solarized-light";
+    }
+    el.dataset.theme = t;
+  }
+  paintThemeToggle();
+}
+function toggleTheme() {
+  const dark = document.documentElement.dataset.theme !== "solarized-dark";
+  document.documentElement.dataset.theme = dark ? "solarized-dark" : "solarized-light";
+  try { localStorage.setItem(THEME_KEY, dark ? "solarized-dark" : "solarized-light"); } catch (e) {}
+  paintThemeToggle();
+}
 function setNav(key) {
   $$(".nav-item").forEach((a) => a.classList.toggle("active", a.dataset.nav === key));
 }
@@ -517,7 +547,7 @@ function articleModal(pid) {
   openModal("New article", `
     ${field("Title", input("title", ""))}
     ${field("Body (markdown)", `<textarea name="body" rows="10" placeholder="# Heading&#10;&#10;Write the article in markdown…"></textarea>`)}
-    <div style="font-size:12px;color:var(--faint);margin-top:10px">Saved as a native Anytype page, linked to this project.</div>`,
+    <div style="font-size:12px;color:var(--muted-foreground);margin-top:10px">Saved as a native Anytype page, linked to this project.</div>`,
     async (d, close) => {
       if (!d.title.trim()) { toast("Article title is required", true); return; }
       const { article } = await POST(`/api/projects/${pid}/wiki`, { title: d.title, body: d.body });
@@ -624,9 +654,9 @@ function taskModal(pid, existing) {
     </div>
     ${field("Notes", `<textarea name="notes" rows="3">${esc(t.notes || "")}</textarea>`)}
     ${existing ? `<div style="margin-top:14px"><button class="btn btn-destructive btn-sm" id="m-delete">Delete task</button></div>
-      ${t.source === "ascent" ? `<div style="font-size:12px;color:var(--faint);margin-top:8px">Also removes the task object from Anytype.</div>`
-        : `<div style="font-size:12px;color:var(--faint);margin-top:8px">Only unlinks — the task stays in Anytype.</div>`}` : ""}
-    <div style="font-size:12px;color:var(--faint);margin-top:10px">Saved as a native Anytype task object.</div>`,
+      ${t.source === "ascent" ? `<div style="font-size:12px;color:var(--muted-foreground);margin-top:8px">Also removes the task object from Anytype.</div>`
+        : `<div style="font-size:12px;color:var(--muted-foreground);margin-top:8px">Only unlinks — the task stays in Anytype.</div>`}` : ""}
+    <div style="font-size:12px;color:var(--muted-foreground);margin-top:10px">Saved as a native Anytype task object.</div>`,
     async (d, close) => {
       if (!d.title.trim()) { toast("Task title is required", true); return; }
       const payload = { title: d.title, notes: d.notes, due_date: d.due_date, status: d.status };
@@ -675,7 +705,10 @@ async function route() {
   }
 }
 window.addEventListener("hashchange", route);
+const themeBtn = $("#theme-toggle");
+if (themeBtn) themeBtn.onclick = toggleTheme;
+initTheme();
 route();
 
 // test seam
-globalThis.__test = { taskCard, duePill, fmtDate, COLUMNS, md, vOverview, vProjects, vProjectDetail, vSetup, renderSetup, renderWikiList, renderWikiPane, selectArticle, openModal, projectModal, taskModal, importModal };
+globalThis.__test = { taskCard, duePill, fmtDate, COLUMNS, md, vOverview, vProjects, vProjectDetail, vSetup, renderSetup, renderWikiList, renderWikiPane, selectArticle, openModal, projectModal, taskModal, importModal, initTheme, toggleTheme, paintThemeToggle };

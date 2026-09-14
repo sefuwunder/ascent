@@ -48,7 +48,9 @@ Each project has a **Wiki** tab next to its kanban board: a lightweight knowledg
 
 ### Design system
 
-Ascent's UI is a **dependency-free visual port of [shadcn/ui](https://ui.shadcn.com)'s Zinc design system** — CSS-variable theming, card anatomy, button variants/sizes, badges, dialogs, tabs, checkbox, progress, separators, skeletons, avatar, table, dropdown menu, and toast — recreated in vanilla CSS with zero dependencies and no build step. This is not a shadcn/React installation: there is no Tailwind, no Radix, no bundler.
+Ascent's UI is a **dependency-free visual port of [shadcn/ui](https://ui.shadcn.com)'s design system** — CSS-variable theming, card anatomy, button variants/sizes, badges, dialogs, tabs, checkbox, progress, separators, skeletons, avatar, table, dropdown menu, and toast — recreated in vanilla CSS with zero dependencies and no build step. This is not a shadcn/React installation: there is no Tailwind, no Radix, no bundler.
+
+The shadcn tokens carry a **Solarized day/night theme**: Solarized light (`#fdf6e3`) is the default, Solarized dark (`#002b36`) is one tap away via the ☾/☀ button in the topbar. The choice persists in `localStorage`; with no stored preference it follows your OS `prefers-color-scheme`. Status and severity colors (kanban column dots, due-date pills, badges) use the Solarized accent set in both themes.
 
 ### API
 

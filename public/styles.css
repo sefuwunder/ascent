@@ -1,41 +1,56 @@
 /* Ascent — shadcn/ui design system, ported to dependency-free CSS.
-   Zinc theme tokens (from https://ui.shadcn.com, light). No Tailwind, no React,
-   no Radix: component classes below mirror the shadcn component anatomy
-   (button variants/sizes, card, dialog, input, badge, tabs, checkbox,
-   separator, skeleton, progress, toast) in plain CSS. */
-:root {
-  --background: #ffffff;
-  --foreground: #09090b;
-  --card: #ffffff;
-  --card-foreground: #09090b;
-  --popover: #ffffff;
-  --popover-foreground: #09090b;
-  --primary: #18181b;
-  --primary-foreground: #fafafa;
-  --secondary: #f4f4f5;
-  --secondary-foreground: #18181b;
-  --muted: #f4f4f5;
-  --muted-foreground: #71717a;
-  --accent: #f4f4f5;
-  --accent-foreground: #18181b;
-  --destructive: #ef4444;
-  --destructive-foreground: #fafafa;
-  --border: #e4e4e7;
-  --input: #e4e4e7;
-  --ring: #09090b;
-  --chart-1: #e76e50;
-  --chart-2: #2a9d90;
-  --chart-3: #274754;
-  --chart-4: #e8c468;
-  --chart-5: #f4a462;
-  --sidebar: #fafafa;
-  --sidebar-foreground: #3f3f46;
-  --sidebar-primary: #18181b;
-  --sidebar-primary-foreground: #fafafa;
-  --sidebar-accent: #f4f4f5;
-  --sidebar-accent-foreground: #18181b;
-  --sidebar-border: #e5e7eb;
-  --sidebar-ring: #3b82f6;
+   Solarized day/night themes mapped onto the shadcn CSS-variable names, so
+   every ported component follows the active theme automatically.
+   Toggle with data-theme="solarized-light" / "solarized-dark" on <html>.
+   No Tailwind, no React, no Radix: component classes below mirror the shadcn
+   component anatomy (button variants/sizes, card, dialog, input, badge,
+   tabs, checkbox, separator, skeleton, progress, toast) in plain CSS. */
+:root,
+:root[data-theme="solarized-light"] {
+  color-scheme: light;
+  /* Solarized light — background base3, body text base00, borders base2 */
+  --background: #fdf6e3;
+  --foreground: #657b83;
+  --card: #fdf6e3;
+  --card-foreground: #657b83;
+  --popover: #fdf6e3;
+  --popover-foreground: #657b83;
+  --primary: #268bd2;
+  --primary-foreground: #fdf6e3;
+  --secondary: #eee8d5;
+  --secondary-foreground: #586e75;
+  --muted: #eee8d5;
+  --muted-foreground: #93a1a1;
+  --accent: #eee8d5;
+  --accent-foreground: #586e75;
+  --destructive: #dc322f;
+  --destructive-foreground: #fdf6e3;
+  --border: #e0d6b8;
+  --input: #e0d6b8;
+  --ring: #268bd2;
+  --warning-fg: #7a5c00;
+  --chart-1: #cb4b16;
+  --chart-2: #2aa198;
+  --chart-3: #859900;
+  --chart-4: #b58900;
+  --chart-5: #6c71c4;
+  --sidebar: #faf5e6;
+  --sidebar-foreground: #657b83;
+  --sidebar-primary: #268bd2;
+  --sidebar-primary-foreground: #fdf6e3;
+  --sidebar-accent: #eee8d5;
+  --sidebar-accent-foreground: #586e75;
+  --sidebar-border: #e0d6b8;
+  --sidebar-ring: #268bd2;
+  /* Solarized accent set — identical values in both themes */
+  --sol-blue: #268bd2;
+  --sol-cyan: #2aa198;
+  --sol-green: #859900;
+  --sol-yellow: #b58900;
+  --sol-orange: #cb4b16;
+  --sol-red: #dc322f;
+  --sol-magenta: #d33682;
+  --sol-violet: #6c71c4;
   --radius: 0.625rem;
   --radius-sm: 0.375rem;
   --radius-md: 0.5rem;
@@ -46,6 +61,43 @@
   --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
   --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
   --font-sans: "Inter", ui-sans-serif, -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+}
+/* Solarized dark — background base03, body text base0, borders base02-ish */
+:root[data-theme="solarized-dark"] {
+  color-scheme: dark;
+  --background: #002b36;
+  --foreground: #839496;
+  --card: #0a3c49;
+  --card-foreground: #93a1a1;
+  --popover: #073642;
+  --popover-foreground: #93a1a1;
+  --primary: #268bd2;
+  --primary-foreground: #fdf6e3;
+  --secondary: #073642;
+  --secondary-foreground: #93a1a1;
+  --muted: #073642;
+  --muted-foreground: #586e75;
+  --accent: #0a3c49;
+  --accent-foreground: #93a1a1;
+  --destructive: #dc322f;
+  --destructive-foreground: #fdf6e3;
+  --border: #16414e;
+  --input: #16414e;
+  --ring: #268bd2;
+  --warning-fg: #b58900;
+  --chart-1: #cb4b16;
+  --chart-2: #2aa198;
+  --chart-3: #859900;
+  --chart-4: #b58900;
+  --chart-5: #6c71c4;
+  --sidebar: #073642;
+  --sidebar-foreground: #839496;
+  --sidebar-primary: #268bd2;
+  --sidebar-primary-foreground: #fdf6e3;
+  --sidebar-accent: #0a3c49;
+  --sidebar-accent-foreground: #93a1a1;
+  --sidebar-border: #16414e;
+  --sidebar-ring: #268bd2;
 }
 * { box-sizing: border-box; }
 html, body { height: 100%; }
@@ -122,7 +174,7 @@ button:not(:disabled), [role="button"]:not(:disabled) { cursor: pointer; }
 .btn:focus-visible { outline: none; border-color: var(--ring); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ring) 50%, transparent); }
 .btn-default { background: var(--primary); color: var(--primary-foreground); box-shadow: var(--shadow-xs); }
 .btn-default:hover { background: color-mix(in srgb, var(--primary) 90%, transparent); }
-.btn-destructive { background: var(--destructive); color: #fff; box-shadow: var(--shadow-xs); }
+.btn-destructive { background: var(--destructive); color: var(--destructive-foreground); box-shadow: var(--shadow-xs); }
 .btn-destructive:hover { background: color-mix(in srgb, var(--destructive) 90%, transparent); }
 .btn-outline { border-color: var(--input); background: var(--background); box-shadow: var(--shadow-xs); }
 .btn-outline:hover { background: var(--accent); color: var(--accent-foreground); }
@@ -177,10 +229,14 @@ input[type="checkbox"], input[type="radio"] { width: 1rem; height: 1rem; accent-
 }
 .badge-default { background: var(--primary); color: var(--primary-foreground); }
 .badge-secondary { background: var(--secondary); color: var(--secondary-foreground); }
-.badge-destructive { background: var(--destructive); color: #fff; }
+.badge-destructive { background: var(--destructive); color: var(--destructive-foreground); }
 .badge-outline { color: var(--foreground); border-color: var(--border); }
-/* project extension: amber warning badge (shadcn has no warning variant) */
-.badge-warning { background: #fef3c7; color: #92400e; border-color: #fde68a; }
+/* project extension: Solarized-yellow warning badge (shadcn has no warning variant) */
+.badge-warning {
+  background: color-mix(in srgb, var(--sol-yellow) 14%, var(--background));
+  color: var(--warning-fg);
+  border-color: color-mix(in srgb, var(--sol-yellow) 45%, var(--border));
+}
 
 /* ---------- dialog (shadcn) ---------- */
 .dialog-overlay {
