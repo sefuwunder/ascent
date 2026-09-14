@@ -421,11 +421,26 @@ function projectModal(existing) {
 function importModal(kind, projectId) {
   const isTask = kind === "task";
   const isWiki = kind === "wiki";
-  openModal(isTask ? "Import tasks" : isWiki ? "Import wiki pages" : "Import project",
-    `<div class="search-row"><input id="imp-q" placeholder="Search your ${isTask ? "tasks" : "pages"} in Anytype…"><button class="btn btn-outline" id="imp-go">Search</button></div>
+  const anyPane = `<div class="search-row"><input id="imp-q" placeholder="Search your ${isTask ? "tasks" : "pages"} in Anytype…"><button class="btn btn-outline" id="imp-go">Search</button></div>
      <div id="imp-results" style="max-height:300px;overflow:auto"></div>
-     <p style="font-size:12px;color:var(--muted-foreground)">Already-tracked items are hidden. Imported items keep living in Anytype — Ascent only links to them.</p>`,
+     <p style="font-size:12px;color:var(--muted-foreground)">Already-tracked items are hidden. Imported items keep living in Anytype — Ascent only links to them.</p>`;
+  openModal(isTask ? "Import tasks" : isWiki ? "Import wiki pages" : "Import project",
+    isTask
+      ? `<div class="tabs-list" role="tablist" style="margin-bottom:12px">
+           <button class="tabs-trigger on" id="imp-tab-any">Anytype</button>
+           <button class="tabs-trigger" id="imp-tab-cu">ClickUp</button>
+         </div>
+         <div id="imp-any">${anyPane}</div>
+         <div id="imp-cu" style="display:none"></div>`
+      : anyPane,
     async (_d, close) => {
+      if (isTask && cuTab === "cu") {
+        const { imported, skipped } = await clickupImportSelected(projectId);
+        close();
+        toast(`Imported ${imported}${skipped ? `, ${skipped} already imported — skipped` : ""}`);
+        route();
+        return;
+      }
       const ids = $$("#imp-results input[type=checkbox]:checked").map((c) => c.value);
       if (!ids.length) { toast("Select at least one item", true); return; }
       if (isTask) await POST(`/api/projects/${projectId}/tasks/import`, { object_ids: ids });
@@ -448,6 +463,166 @@ function importModal(kind, projectId) {
   $("#imp-go").onclick = run;
   $("#imp-q").addEventListener("keydown", (e) => { if (e.key === "Enter") run(); });
   run();
+  if (isTask) {
+    cuTab = "any";
+    $("#imp-tab-any").onclick = () => cuShowTab("any");
+    $("#imp-tab-cu").onclick = () => cuShowTab("cu");
+  }
+}
+
+/* ---------- ClickUp import (one-way: ClickUp → Ascent) ----------
+   The token is pasted by the user and POSTed to the server, which stores it
+   in gitignored data/links.json and proxies every ClickUp call. The browser
+   never sees the token again: status returns only a boolean. */
+let cuTab = "any";
+let cu = null;
+function cuInit() {
+  cu = { connected: false, trail: [], level: "", items: [], tasks: [], loading: false, error: "" };
+}
+function cuShowTab(which) {
+  cuTab = which;
+  const any = $("#imp-tab-any"), ctab = $("#imp-tab-cu");
+  if (any && any.classList) any.classList.toggle("on", which === "any");
+  if (ctab && ctab.classList) ctab.classList.toggle("on", which === "cu");
+  const ap = $("#imp-any"), cp = $("#imp-cu");
+  if (ap && ap.style) ap.style.display = which === "any" ? "" : "none";
+  if (cp && cp.style) cp.style.display = which === "cu" ? "" : "none";
+  if (which === "cu") cuShowPane();
+}
+async function cuShowPane() {
+  const box = $("#imp-cu");
+  if (!box) return;
+  if (!cu) cuInit();
+  try { cu.connected = !!(await GET("/api/integrations/clickup/status")).connected; }
+  catch { cu.connected = false; }
+  cuRender();
+  if (cu.connected && !cu.level) await cuLoadTeams();
+}
+function cuRender() {
+  const box = $("#imp-cu");
+  if (!box) return;
+  box.innerHTML = cuPaneHtml();
+  cuWirePane();
+}
+function cuCrumbHtml() {
+  const bits = [`<button class="btn btn-link btn-sm" data-cu-crumb="-1">Workspaces</button>`];
+  cu.trail.forEach((t, i) => {
+    bits.push(`<button class="btn btn-link btn-sm" data-cu-crumb="${i}">${esc(t.name)}</button>`);
+  });
+  return bits.join('<span style="color:var(--muted-foreground);font-size:12px"> / </span>');
+}
+function cuPaneHtml() {
+  if (!cu.connected) return `
+    <p style="font-size:12px;color:var(--muted-foreground);margin:0 0 10px">Paste a <strong>Personal API token</strong> — in ClickUp: your avatar → <em>Apps</em> → <em>Personal API token</em>. The token is stored on this server only and never sent back to your browser.</p>
+    <div class="search-row"><input id="cu-token" type="password" placeholder="pk_…" autocomplete="off" style="flex:1"><button class="btn btn-default" id="cu-connect">Connect</button></div>
+    <div id="cu-msg" style="margin-top:8px;min-height:1.4em"></div>`;
+  const icon = { team: "◈", space: "▦", folder: "🗂", list: "☰" };
+  let list;
+  if (cu.loading) list = `<div class="empty" style="padding:16px">Loading…</div>`;
+  else if (cu.error) list = `<div class="empty" style="padding:16px">⚠ ${esc(cu.error)}</div>`;
+  else if (cu.level === "tasks") {
+    list = cu.tasks.length ? `
+      <label class="import-row" style="font-weight:600"><input type="checkbox" id="cu-all"><span>Select all (${cu.tasks.length})</span></label>
+      ${cu.tasks.map((t) => `<label class="import-row"><input type="checkbox" class="cu-task" value="${esc(t.id)}"><span>${esc(t.name)}${t.status ? ` <span class="badge badge-secondary">${esc(t.status)}</span>` : ""}${t.dueDate ? ` <span style="color:var(--muted-foreground);font-size:12px">◷ ${esc(fmtDate(Number(t.dueDate)))}</span>` : ""}</span></label>`).join("")}`
+      : `<div class="empty" style="padding:16px">No tasks in this list.</div>`;
+  } else {
+    list = cu.items.length ? cu.items.map((it) => `
+      <button class="import-row" data-cu-open="${esc(it.id)}" data-cu-kind="${esc(it.kind)}" style="width:100%;text-align:left;cursor:pointer;background:none;border:none;color:inherit;font:inherit">
+        <span>${icon[it.kind] || "›"}</span><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(it.name)}</span><span style="color:var(--muted-foreground)">›</span>
+      </button>`).join("") : `<div class="empty" style="padding:16px">Nothing here.</div>`;
+  }
+  return `
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+      <div style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${cuCrumbHtml()}</div>
+      <button class="btn btn-link btn-sm" id="cu-disconnect" style="color:var(--destructive);flex-shrink:0">Disconnect</button>
+    </div>
+    <div id="cu-items" style="max-height:300px;overflow:auto">${list}</div>
+    <p style="font-size:12px;color:var(--muted-foreground);margin:10px 0 0">Tasks are created as native Anytype tasks in this project. Re-importing skips tasks already imported.</p>`;
+}
+function cuWirePane() {
+  const conn = $("#cu-connect");
+  if (conn) conn.onclick = cuConnect;
+  const tok = $("#cu-token");
+  if (tok && tok.addEventListener) tok.addEventListener("keydown", (e) => { if (e.key === "Enter") cuConnect(); });
+  const dis = $("#cu-disconnect");
+  if (dis) dis.onclick = cuDisconnect;
+  $$("#imp-cu [data-cu-crumb]").forEach((b) => { b.onclick = () => cuCrumb(Number(b.dataset.cuCrumb)); });
+  $$("#imp-cu [data-cu-open]").forEach((b) => { b.onclick = () => cuOpen(b.dataset.cuOpen, b.dataset.cuKind); });
+  const all = $("#cu-all");
+  if (all) all.onclick = () => { $$("#imp-cu .cu-task").forEach((c) => { c.checked = all.checked; }); };
+}
+async function cuConnect() {
+  const token = $("#cu-token").value.trim();
+  const msg = $("#cu-msg");
+  const say = (html) => { if (msg) msg.innerHTML = html; };
+  if (!token) { say(`<span class="badge badge-destructive">Paste your token first</span>`); return; }
+  say(`<span style="font-size:12px;color:var(--muted-foreground)">Connecting…</span>`);
+  try { await POST("/api/integrations/clickup/connect", { token }); }
+  catch (e) { say(`<span class="badge badge-destructive">${esc(e.message)}</span>`); return; }
+  cuInit();
+  await cuShowPane(); // re-renders as connected, then loads teams
+}
+async function cuDisconnect() {
+  await DEL("/api/integrations/clickup/disconnect").catch(() => {});
+  cuInit();
+  cuRender();
+}
+async function cuLoadTeams() {
+  cu.loading = true; cu.error = ""; cu.trail = []; cu.level = "teams"; cuRender();
+  try {
+    const { teams } = await GET("/api/integrations/clickup/teams");
+    cu.items = (teams || []).map((t) => ({ ...t, kind: "team" }));
+  } catch (e) { cu.error = e.message; }
+  cu.loading = false; cuRender();
+}
+async function cuOpen(id, kind) {
+  const it = cu.items.find((x) => String(x.id) === String(id));
+  cu.trail = [...cu.trail, { id, name: (it && it.name) || kind, kind }];
+  await cuOpenInto(id, kind);
+}
+async function cuOpenInto(id, kind) {
+  cu.loading = true; cu.error = ""; cuRender();
+  try {
+    if (kind === "team") {
+      const { spaces } = await GET(`/api/integrations/clickup/teams/${encodeURIComponent(id)}/spaces`);
+      cu.items = (spaces || []).map((s) => ({ ...s, kind: "space" }));
+      cu.level = "browse";
+    } else if (kind === "space") {
+      const [f, l] = await Promise.all([
+        GET(`/api/integrations/clickup/spaces/${encodeURIComponent(id)}/folders`).catch(() => ({ folders: [] })),
+        GET(`/api/integrations/clickup/spaces/${encodeURIComponent(id)}/lists`).catch(() => ({ lists: [] })),
+      ]);
+      cu.items = [
+        ...(f.folders || []).map((x) => ({ ...x, kind: "folder" })),
+        ...(l.lists || []).map((x) => ({ ...x, kind: "list" })),
+      ];
+      cu.level = "browse";
+    } else if (kind === "folder") {
+      const { lists } = await GET(`/api/integrations/clickup/folders/${encodeURIComponent(id)}/lists`);
+      cu.items = (lists || []).map((x) => ({ ...x, kind: "list" }));
+      cu.level = "browse";
+    } else if (kind === "list") {
+      const { tasks } = await GET(`/api/integrations/clickup/lists/${encodeURIComponent(id)}/tasks`);
+      cu.tasks = tasks || [];
+      cu.level = "tasks";
+    }
+  } catch (e) { cu.error = e.message; }
+  cu.loading = false; cuRender();
+}
+async function cuCrumb(i) {
+  const target = i < 0 ? null : cu.trail[i];
+  cu.trail = i < 0 ? [] : cu.trail.slice(0, i);
+  if (!target) { await cuLoadTeams(); return; }
+  await cuOpenInto(target.id, target.kind);
+}
+async function clickupImportSelected(projectId) {
+  const listCrumb = [...cu.trail].reverse().find((t) => t.kind === "list");
+  if (!listCrumb) throw new Error("Pick a ClickUp list first");
+  const checked = $$("#imp-cu .cu-task:checked").map((c) => c.value);
+  if (!checked.length) throw new Error("Select at least one task");
+  const tasks = cu.tasks.filter((t) => checked.includes(String(t.id)));
+  return POST(`/api/integrations/clickup/lists/${encodeURIComponent(listCrumb.id)}/import`,
+    { project_id: projectId, tasks });
 }
 
 /* ---------- project detail: kanban board + wiki ---------- */
@@ -831,4 +1006,4 @@ initTheme();
 route();
 
 // test seam
-globalThis.__test = { taskCard, duePill, fmtDate, COLUMNS, md, vOverview, vProjects, vProjectDetail, vSetup, renderSetup, renderWikiList, renderWikiPane, selectArticle, openModal, projectModal, taskModal, importModal, initTheme, toggleTheme, paintThemeToggle, route, openDrawer, closeDrawer, toggleDrawer, isDrawerOpen, renderBoard, projectRemainingEst, projectEstRaw, estSizeForMins, timeHealthWidget, fetchProjectTasks, Estimate };
+globalThis.__test = { taskCard, duePill, fmtDate, COLUMNS, md, vOverview, vProjects, vProjectDetail, vSetup, renderSetup, renderWikiList, renderWikiPane, selectArticle, openModal, projectModal, taskModal, importModal, initTheme, toggleTheme, paintThemeToggle, route, openDrawer, closeDrawer, toggleDrawer, isDrawerOpen, renderBoard, projectRemainingEst, projectEstRaw, estSizeForMins, timeHealthWidget, fetchProjectTasks, Estimate, cuTabOf: () => cuTab, cuState: () => cu, cuInit, cuShowTab, cuShowPane, cuPaneHtml, cuConnect, cuDisconnect, cuLoadTeams, cuOpen, cuCrumb, clickupImportSelected };

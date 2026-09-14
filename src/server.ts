@@ -9,6 +9,11 @@ import {
   searchSpace, createObject, getObject, updateObject, deleteObject,
   toTaskView, toProjectView, toArticleView, type TaskKeys,
 } from "./anytype";
+import {
+  ClickUpError, cuFetch, validateToken, getTeams, getSpaces, getFolders,
+  getSpaceLists, getFolderLists, getListTasks, taskToDraft, planImport,
+  type CuTask,
+} from "./clickup";
 
 const PORT = Number(process.env.PORT || 3004);
 const DATA = new URL("../data/", import.meta.url).pathname;
@@ -24,7 +29,10 @@ interface Config {
 interface TaskLink { project_id: string; status: string; source: "ascent" | "imported" }
 interface ProjectLink { id: string; source: "ascent" | "imported"; added_at: string }
 interface WikiLink { project_id: string; source: "ascent" | "imported"; added_at: string }
-interface Links { projects: ProjectLink[]; tasks: Record<string, TaskLink>; wiki: Record<string, WikiLink> }
+// ClickUp integration state: the Personal API token (server-side only) and the
+// clickup task id → Anytype task id dedupe map, so re-imports skip known tasks.
+interface ClickUpState { token: string; tasks: Record<string, string> }
+interface Links { projects: ProjectLink[]; tasks: Record<string, TaskLink>; wiki: Record<string, WikiLink>; clickup: ClickUpState }
 
 function loadJson<T>(path: string, fallback: T): T {
   try {
@@ -39,12 +47,13 @@ function saveJson(path: string, v: unknown) {
 }
 
 let config: Config = loadJson<Config>(CONFIG_PATH, { api_key: "", space_id: "", space_name: "", task_keys: { done: "done", due: "due_date" } });
-let links: Links = loadJson<Links>(LINKS_PATH, { projects: [], tasks: {}, wiki: {} });
+let links: Links = loadJson<Links>(LINKS_PATH, { projects: [], tasks: {}, wiki: {}, clickup: { token: "", tasks: {} } });
 if (config.api_key) setApiKey(config.api_key);
 
 const saveConfig = () => saveJson(CONFIG_PATH, config);
 const saveLinks = () => saveJson(LINKS_PATH, links);
 if (!links.wiki) { links.wiki = {}; saveLinks(); } // upgrade path for pre-wiki link indexes
+if (!links.clickup) { links.clickup = { token: "", tasks: {} }; saveLinks(); } // upgrade path for pre-ClickUp link indexes
 
 const STATUSES = ["backlog", "in_progress", "review", "done"] as const;
 
@@ -72,6 +81,12 @@ function needSpace(): Response | null {
 }
 
 function atErr(e: unknown): Response {
+  if (e instanceof ClickUpError) {
+    if (e.status === 401 || e.status === 403)
+      return json({ error: "ClickUp rejected that token — check it and try again" }, 401);
+    if (e.status === 0) return json({ error: e.message }, 502);
+    return json({ error: `ClickUp: ${e.message}` }, 502);
+  }
   if (e instanceof AnytypeError) {
     if (e.status === 0) return json({ error: e.message }, 502);
     if (e.status === 401 || e.status === 403)
@@ -141,6 +156,28 @@ async function wikiFor(projectId: string): Promise<any[]> {
   if (pruned) saveLinks();
   out.sort((a, b) => b.updatedMs - a.updatedMs);
   return out;
+}
+
+// Shared task-creation path: builds a native Anytype task object and links it
+// to the project. Used by manual task creation and the ClickUp importer alike.
+async function createLinkedTask(
+  pid: string,
+  draft: { title: string; notes?: string; due_date?: string; status?: string },
+  source: "ascent" | "imported",
+) {
+  const status = STATUSES.includes(draft.status as any) ? (draft.status as any) : "backlog";
+  const props: Array<Record<string, any>> = [{ key: config.task_keys.done, checkbox: status === "done" }];
+  if (draft.due_date) props.push({ key: config.task_keys.due, date: draft.due_date });
+  const o = await createObject(config.space_id, {
+    name: draft.title.trim(),
+    type_key: "task",
+    body: draft.notes || "",
+    properties: props,
+  });
+  const tv = toTaskView(o, config.task_keys);
+  links.tasks[tv.id] = { project_id: pid, status, source };
+  saveLinks();
+  return { ...tv, status: effectiveStatus(tv.done, links.tasks[tv.id]), source };
 }
 
 const server = Bun.serve({
@@ -349,19 +386,8 @@ const server = Bun.serve({
         if (!links.projects.some((p) => p.id === pid)) return json({ error: "project not tracked" }, 404);
         const b = await readBody(req);
         if (!b.title?.trim()) return json({ error: "task title is required" }, 400);
-        const status = STATUSES.includes(b.status) ? b.status : "backlog";
-        const props: Array<Record<string, any>> = [{ key: config.task_keys.done, checkbox: status === "done" }];
-        if (b.due_date) props.push({ key: config.task_keys.due, date: b.due_date });
-        const o = await createObject(config.space_id, {
-          name: b.title.trim(),
-          type_key: "task",
-          body: b.notes || "",
-          properties: props,
-        });
-        const tv = toTaskView(o, config.task_keys);
-        links.tasks[tv.id] = { project_id: pid, status, source: "ascent" };
-        saveLinks();
-        return json({ task: { ...tv, status: effectiveStatus(tv.done, links.tasks[tv.id]), source: "ascent" } }, 201);
+        const task = await createLinkedTask(pid, b, "ascent");
+        return json({ task }, 201);
       }
       const impMatch = path.match(/^\/api\/projects\/([^/]+)\/tasks\/import$/);
       if (impMatch && method === "POST") {
@@ -514,6 +540,104 @@ const server = Bun.serve({
           saveLinks();
           return json({ ok: true });
         }
+      }
+
+      // ---------- ClickUp integration (one-way import: ClickUp → Ascent) ----------
+      // The Personal API token lives only in gitignored data/links.json. It is
+      // never returned by any GET, never logged, and every ClickUp call is
+      // proxied through the server so the token never reaches the browser.
+      const cuToken = () => links.clickup.token;
+      const needCu = (): Response | null =>
+        cuToken() ? null : json({ error: "ClickUp not connected" }, 401);
+
+      if (path === "/api/integrations/clickup/status" && method === "GET") {
+        return json({ connected: !!cuToken() });
+      }
+      if (path === "/api/integrations/clickup/connect" && method === "POST") {
+        const b = await readBody(req);
+        const token = String(b.token || "").trim();
+        if (!token) return json({ error: "paste your ClickUp Personal API token" }, 400);
+        await validateToken(token); // throws ClickUpError(401) on a bad token
+        links.clickup.token = token;
+        saveLinks();
+        return json({ ok: true });
+      }
+      if (path === "/api/integrations/clickup/disconnect" && method === "DELETE") {
+        links.clickup.token = "";
+        saveLinks();
+        return json({ ok: true });
+      }
+      if (path === "/api/integrations/clickup/teams" && method === "GET") {
+        const g = needCu();
+        if (g) return g;
+        return json({ teams: await getTeams(cuToken()) });
+      }
+      const cuTeamSpaces = path.match(/^\/api\/integrations\/clickup\/teams\/([^/]+)\/spaces$/);
+      if (cuTeamSpaces && method === "GET") {
+        const g = needCu();
+        if (g) return g;
+        return json({ spaces: await getSpaces(cuToken(), decodeURIComponent(cuTeamSpaces[1])) });
+      }
+      const cuSpaceFolders = path.match(/^\/api\/integrations\/clickup\/spaces\/([^/]+)\/folders$/);
+      if (cuSpaceFolders && method === "GET") {
+        const g = needCu();
+        if (g) return g;
+        return json({ folders: await getFolders(cuToken(), decodeURIComponent(cuSpaceFolders[1])) });
+      }
+      const cuSpaceLists = path.match(/^\/api\/integrations\/clickup\/spaces\/([^/]+)\/lists$/);
+      if (cuSpaceLists && method === "GET") {
+        const g = needCu();
+        if (g) return g;
+        return json({ lists: await getSpaceLists(cuToken(), decodeURIComponent(cuSpaceLists[1])) });
+      }
+      const cuFolderLists = path.match(/^\/api\/integrations\/clickup\/folders\/([^/]+)\/lists$/);
+      if (cuFolderLists && method === "GET") {
+        const g = needCu();
+        if (g) return g;
+        return json({ lists: await getFolderLists(cuToken(), decodeURIComponent(cuFolderLists[1])) });
+      }
+      const cuListTasks = path.match(/^\/api\/integrations\/clickup\/lists\/([^/]+)\/tasks$/);
+      if (cuListTasks && method === "GET") {
+        const g = needCu();
+        if (g) return g;
+        return json({ tasks: await getListTasks(cuToken(), decodeURIComponent(cuListTasks[1])) });
+      }
+      const cuImport = path.match(/^\/api\/integrations\/clickup\/lists\/([^/]+)\/import$/);
+      if (cuImport && method === "POST") {
+        const gate = needSpace();
+        if (gate) return gate;
+        const g = needCu();
+        if (g) return g;
+        const b = await readBody(req);
+        const pid = String(b.project_id || "");
+        if (!links.projects.some((p) => p.id === pid)) return json({ error: "project not tracked" }, 404);
+        const picked: any[] = Array.isArray(b.tasks) ? b.tasks : [];
+        const { toImport, skipped: alreadySkipped } = planImport(
+          links.clickup.tasks,
+          picked.map((t) => String(t.id || "")),
+        );
+        const byId = new Map(picked.map((t) => [String(t.id || ""), t]));
+        let imported = 0;
+        let skipped = alreadySkipped.length;
+        for (const cid of toImport) {
+          const t = byId.get(cid) || {};
+          const cuTask: CuTask = {
+            id: cid,
+            name: String(t.name ?? ""),
+            status: String(t.status ?? ""),
+            statusType: String(t.statusType ?? "open"),
+            dueDate: t.dueDate != null ? String(t.dueDate) : t.due_date != null ? String(t.due_date) : null,
+            priority: t.priority != null ? String(t.priority) : null,
+            description: String(t.description ?? ""),
+          };
+          const draft = taskToDraft(cuTask);
+          if (!draft.title.trim()) { skipped++; continue; }
+          const task = await createLinkedTask(pid, draft, "ascent");
+          links.clickup.tasks[cid] = task.id; // dedupe map survives restarts
+          imported++;
+        }
+        saveLinks();
+        return json({ ok: true, imported, skipped }, 201);
       }
 
       // ---------- search (for import pickers) ----------

@@ -42,6 +42,14 @@ Task property keys (`done`, `due_date`) are **discovered at setup** via `GET /v1
 
 Already track work in Anytype? Use **Import** on the Projects page or inside a project to link existing pages/tasks instead of recreating them. Imported items are never deleted by Ascent — removing one only unlinks it. Items Ascent created itself *are* deleted in Anytype when you delete them here (with a confirmation).
 
+### ClickUp import (one-way: ClickUp → Ascent)
+
+Coming from ClickUp? The task-import dialog has a second **ClickUp** tab next to Anytype. Paste a **Personal API token** (in ClickUp: your avatar → *Apps* → *Personal API token*) and browse workspace → space → folder/list → tasks, with a breadcrumb trail, select-all, and one-click import into the current project.
+
+The import is strictly **one-way**: ClickUp tasks become **native Anytype tasks** through the exact same creation path as manually added tasks (title, done checkbox, due date, markdown notes — the done/due property keys are the ones discovered at setup). Nothing ever flows back to ClickUp, and the token is **never returned to the browser** — `GET /api/integrations/clickup/status` only answers `{connected: true|false}`, and every ClickUp API call is proxied through the Ascent server.
+
+The token lives only in the server-side `data/links.json` (gitignored, never committed). A `clickup_id → anytype_id` map in the same file **dedupes** imports: re-importing the same task skips it ("N imported, M already imported — skipped"), and the map survives disconnecting and reconnecting, so you can never double-import by accident.
+
 ### Project wiki
 
 Each project has a **Wiki** tab next to its kanban board: a lightweight knowledge base of markdown articles (runbooks, specs, meeting notes) stored as native Anytype pages, so they're searchable and editable in Anytype itself. Articles render headings, lists, code blocks, quotes, links and inline formatting; the editor is plain markdown. You can also import existing Anytype pages into a project's wiki — same rule as tasks: imported pages are unlinked, never deleted.
@@ -101,6 +109,16 @@ POST   /api/projects/:id/wiki     {title, body} → Anytype page
 POST   /api/projects/:id/wiki/import {object_ids}
 GET/PATCH/DELETE /api/wiki/:id    {title?, body?}
 GET    /api/search?q=&kind=task|page  import picker
+POST   /api/integrations/clickup/connect     {token} → validated against ClickUp /team, stored server-side
+GET    /api/integrations/clickup/status      {connected} — the token is never returned
+DELETE /api/integrations/clickup/disconnect  clears the token (dedupe map is kept)
+GET    /api/integrations/clickup/teams
+GET    /api/integrations/clickup/teams/:id/spaces
+GET    /api/integrations/clickup/spaces/:id/folders
+GET    /api/integrations/clickup/spaces/:id/lists
+GET    /api/integrations/clickup/folders/:id/lists
+GET    /api/integrations/clickup/lists/:id/tasks
+POST   /api/integrations/clickup/lists/:id/import {project_id, tasks} → native Anytype tasks, deduped by clickup_id
 ```
 
 ## Troubleshooting
