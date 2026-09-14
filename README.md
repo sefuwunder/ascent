@@ -66,11 +66,15 @@ On top of the design system, Ascent wears an **iOS-style skin**:
 
 Ascent embeds a **tiny word-bag task-time estimator** (`public/estimate.js`, a few KB, zero dependencies, fully deterministic): a seed lexicon of ~150 common task words, each mapped to a typical duration range in minutes. A task title's estimate pools the ranges of its matched words (median of typicals for the point estimate, pooled lo–hi for the range), scaled by effort modifiers (`quick` ×0.5 … `comprehensive` ×1.6). Titles with no known words get no estimate rather than noise — e.g. "email steve" → ≈10m, "contact bill" → ≈20–40m, "research vision" → ≈60–80m.
 
-Estimates surface three ways, all styled with the Solarized accent palette and no animation:
+Estimates surface five ways, all styled with the Solarized accent palette and no animation:
 
 - a **⏱ chip** on every kanban task card, color-coded by t-shirt size (XS <15m cyan · S 15–30m green · M 30–60m yellow · L 1–2h orange · XL 2h+ red), with the full range in its tooltip;
 - the same chip inside the task modal, **updating live as you type the title**;
-- a **per-column total** (sum of point estimates, e.g. `≈3.5h`) in each kanban column header.
+- a **per-column total** (sum of point estimates, e.g. `≈3.5h`) in each kanban column header;
+- a **per-project estimate** on the projects grid — each project card shows `⏱ ≈40m remaining`, the sum of point estimates for that project's open (non-done) tasks;
+- the same per-project figure inline in each overview **Project health** row.
+
+Per-project estimates are computed client-side by fetching each displayed project's task list (one extra request per project; a project whose tasks fail to load simply shows no estimate).
 
 ### API
 

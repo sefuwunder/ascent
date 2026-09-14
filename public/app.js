@@ -241,6 +241,7 @@ async function vOverview() {
   let d;
   try { d = await GET("/api/overview"); }
   catch (e) { view.innerHTML = `<div class="empty"><span class="big">⚠</span>${esc(e.message)}</div>`; return; }
+  const otaskMap = await fetchProjectTasks(d.project_list);
 
   const kpis = [
     ["Projects", d.projects, "tracked in Anytype"],
@@ -264,20 +265,46 @@ async function vOverview() {
         </div>`).join("")}
     </div>` : ""}
     <div class="section-title">Project health</div>
-    ${d.project_list.length ? d.project_list.map((p) => `
+    ${d.project_list.length ? d.project_list.map((p) => {
+      const est = projectRemainingEst(otaskMap[p.id]);
+      return `
       <div class="card health-row" data-goto="${p.id}">
         <div class="p-ico">${esc(p.icon)}</div>
         <div class="p-main"><div class="p-name">${esc(p.name)}</div>
-          <div class="p-sub">${p.done}/${p.total} tasks done${p.overdue ? ` · <b style="color:var(--destructive)">${p.overdue} overdue</b>` : ""}</div></div>
+          <div class="p-sub">${p.done}/${p.total} tasks done${est ? ` · <span class="est-chip">⏱ ${est} remaining</span>` : ""}${p.overdue ? ` · <b style="color:var(--destructive)">${p.overdue} overdue</b>` : ""}</div></div>
         <div class="progress"><div class="progress-indicator" style="width:${p.progress}%"></div></div>
         <div style="font-weight:600;font-variant-numeric:tabular-nums;width:44px;text-align:right">${p.progress}%</div>
-      </div>`).join("")
+      </div>`;
+    }).join("")
     : `<div class="card"><div class="empty"><span class="big">▦</span>No projects yet.<br><br><button class="btn btn-default" id="empty-new">Create your first project</button></div></div>`}`;
 
   $$("[data-goto]").forEach((el) => { el.onclick = () => { location.hash = `#/projects/${el.dataset.goto}`; }; });
   $("#ov-new-project").onclick = () => projectModal();
   const en = $("#empty-new");
   if (en) en.onclick = () => projectModal();
+}
+
+/* ---------- per-project remaining-time estimates (word-bag estimator) ---------- */
+// Sum of point estimates for a project's open (non-done) tasks; "" when none estimable.
+function projectRemainingEst(tasks) {
+  let sum = 0, n = 0;
+  for (const t of tasks || []) {
+    if (!t || t.status === "done") continue;
+    const e = Estimate.estimateTask(t.title);
+    if (e) { sum += e.point; n++; }
+  }
+  return n ? `≈${Estimate.fmtMins(sum)}` : "";
+}
+
+// Fetch task lists for the displayed projects; a failed project just yields no estimate.
+async function fetchProjectTasks(projects) {
+  const lists = await Promise.all((projects || []).map(async (p) => {
+    try { return (await GET(`/api/projects/${encodeURIComponent(p.id)}`)).tasks || []; }
+    catch (e) { return []; }
+  }));
+  const m = {};
+  (projects || []).forEach((p, i) => { m[p.id] = lists[i]; });
+  return m;
 }
 
 /* ---------- projects ---------- */
@@ -291,19 +318,24 @@ async function vProjects() {
   let d;
   try { d = await GET("/api/projects"); }
   catch (e) { view.innerHTML = `<div class="empty"><span class="big">⚠</span>${esc(e.message)}</div>`; return; }
+  const taskMap = await fetchProjectTasks(d.projects);
   view.innerHTML = d.projects.length ? `
     <div class="proj-grid">
-      ${d.projects.map((p) => `
+      ${d.projects.map((p) => {
+        const est = projectRemainingEst(taskMap[p.id]);
+        return `
         <div class="card proj-card" data-goto="${p.id}">
           <div class="p-ico">${esc(p.icon)}</div>
           <h3>${esc(p.name)}</h3>
           <div class="p-desc">${esc(p.notes) || "&nbsp;"}</div>
+          ${est ? `<div class="p-est"><span class="est-chip">⏱ ${est} remaining</span></div>` : ""}
           <div class="p-foot">
             <div class="progress" style="flex:1;min-width:0"><div class="progress-indicator" style="width:${p.progress}%"></div></div>
             <div class="p-counts">${p.done}/${p.total}</div>
             ${p.source === "imported" ? `<span class="badge badge-outline">imported</span>` : ""}
           </div>
-        </div>`).join("")}
+        </div>`;
+      }).join("")}
     </div>`
     : `<div class="card"><div class="empty"><span class="big">▦</span>No projects yet — create one to get started.</div></div>`;
   $$("[data-goto]").forEach((el) => { el.onclick = () => { location.hash = `#/projects/${el.dataset.goto}`; }; });
@@ -752,4 +784,4 @@ initTheme();
 route();
 
 // test seam
-globalThis.__test = { taskCard, duePill, fmtDate, COLUMNS, md, vOverview, vProjects, vProjectDetail, vSetup, renderSetup, renderWikiList, renderWikiPane, selectArticle, openModal, projectModal, taskModal, importModal, initTheme, toggleTheme, paintThemeToggle, route, openDrawer, closeDrawer, toggleDrawer, isDrawerOpen, renderBoard, Estimate };
+globalThis.__test = { taskCard, duePill, fmtDate, COLUMNS, md, vOverview, vProjects, vProjectDetail, vSetup, renderSetup, renderWikiList, renderWikiPane, selectArticle, openModal, projectModal, taskModal, importModal, initTheme, toggleTheme, paintThemeToggle, route, openDrawer, closeDrawer, toggleDrawer, isDrawerOpen, renderBoard, projectRemainingEst, fetchProjectTasks, Estimate };

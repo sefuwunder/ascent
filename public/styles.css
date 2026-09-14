@@ -289,6 +289,9 @@ input[type="checkbox"]:disabled { cursor: not-allowed; opacity: 0.5; }
 .col-est { color: var(--muted-foreground); font-size: 0.75rem; font-weight: 500; font-variant-numeric: tabular-nums; }
 .col-est:empty { display: none; }
 
+/* per-project remaining-time readout on the projects grid */
+.p-est { margin-top: 0.625rem; }
+
 /* ---------- dialog (iOS sheet presentation) ---------- */
 .dialog-overlay {
   position: fixed; inset: 0; z-index: 100;
