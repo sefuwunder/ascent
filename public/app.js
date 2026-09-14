@@ -1,4 +1,5 @@
-/* Ascent — glossy project management on Anytype */
+/* Ascent — project management on Anytype, styled with the shadcn/ui design system
+   (ported to dependency-free CSS: no React, no Tailwind, no build step) */
 "use strict";
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -31,10 +32,10 @@ function toast(msg, err = false) {
 function openModal(title, bodyHtml, onSubmit, submitLabel = "Save") {
   const root = $("#modal-root");
   root.innerHTML = `
-    <div class="overlay" id="ovl"><div class="modal">
-      <h2>${esc(title)}</h2><div>${bodyHtml}</div>
-      <div class="actions"><button class="btn ghost" id="m-cancel">Cancel</button>
-      <button class="btn primary" id="m-ok">${esc(submitLabel)}</button></div>
+    <div class="dialog-overlay" id="ovl"><div class="dialog-content" role="dialog" aria-modal="true">
+      <h2 class="dialog-title">${esc(title)}</h2><div>${bodyHtml}</div>
+      <div class="dialog-footer"><button class="btn btn-ghost" id="m-cancel">Cancel</button>
+      <button class="btn btn-default" id="m-ok">${esc(submitLabel)}</button></div>
     </div></div>`;
   const close = () => (root.innerHTML = "");
   $("#m-cancel").onclick = close;
@@ -59,10 +60,10 @@ const select = (name, options, val = "") =>
   `<select name="${name}">${options.map(([v, l]) => `<option value="${esc(v)}" ${String(v) === String(val) ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
 
 const COLUMNS = [
-  ["backlog", "Backlog", "#8b99b0"],
-  ["in_progress", "In progress", "#4f7cff"],
-  ["review", "Review", "#d9931e"],
-  ["done", "Done", "#1f9d63"],
+  ["backlog", "Backlog", "#71717a"],
+  ["in_progress", "In progress", "#3b82f6"],
+  ["review", "Review", "#d97706"],
+  ["done", "Done", "#2a9d90"],
 ];
 const colName = (s) => (COLUMNS.find((c) => c[0] === s) || [])[1] || s;
 
@@ -75,10 +76,10 @@ function duePill(t) {
   if (!t.dueMs || t.status === "done") return "";
   const start = new Date(); start.setHours(0, 0, 0, 0);
   const day = 86400000;
-  if (t.dueMs < start.getTime()) return `<span class="pill overdue">◷ overdue · ${esc(fmtDate(t.dueMs))}</span>`;
-  if (t.dueMs < start.getTime() + day) return `<span class="pill today">◷ today</span>`;
-  if (t.dueMs < start.getTime() + 7 * day) return `<span class="pill soon">◷ ${esc(fmtDate(t.dueMs))}</span>`;
-  return `<span class="pill">◷ ${esc(fmtDate(t.dueMs))}</span>`;
+  if (t.dueMs < start.getTime()) return `<span class="badge badge-destructive">◷ overdue · ${esc(fmtDate(t.dueMs))}</span>`;
+  if (t.dueMs < start.getTime() + day) return `<span class="badge badge-warning">◷ today</span>`;
+  if (t.dueMs < start.getTime() + 7 * day) return `<span class="badge badge-secondary">◷ ${esc(fmtDate(t.dueMs))}</span>`;
+  return `<span class="badge badge-secondary">◷ ${esc(fmtDate(t.dueMs))}</span>`;
 }
 const isoDate = (ms) => {
   if (!ms) return "";
@@ -124,7 +125,7 @@ function renderSetup() {
       <h2>Connect Anytype</h2>
       <p>Ascent stores every project and task as native objects in your Anytype space, through the official local API. Your data never leaves your machine.</p>
       <div id="pair-zone" style="margin-top:18px">
-        <button class="btn primary" id="req-code" style="width:100%;justify-content:center;">Request pairing code</button>
+        <button class="btn btn-default" id="req-code" style="width:100%;justify-content:center;">Request pairing code</button>
       </div>`;
   } else {
     body = `
@@ -138,7 +139,7 @@ function renderSetup() {
       </div>`;
   }
   view.innerHTML = `
-    <div class="setup-wrap"><div class="panel setup-card">
+    <div class="setup-wrap"><div class="card setup-card">
       <div class="steps"><div class="step-dot ${s.step >= 1 ? "on" : ""}"></div><div class="step-dot ${s.step >= 2 ? "on" : ""}"></div></div>
       ${body}
     </div></div>`;
@@ -151,7 +152,7 @@ function renderSetup() {
         $("#pair-zone").innerHTML = `
           <p style="margin-bottom:12px">A <b>4-digit code</b> is now showing in your Anytype app.<br>Enter it below to finish pairing.</p>
           <input class="code-input" id="pair-code" maxlength="4" inputmode="numeric" placeholder="····" style="margin-bottom:12px">
-          <button class="btn primary" id="do-pair" style="width:100%;justify-content:center;">Pair with Anytype</button>`;
+          <button class="btn btn-default" id="do-pair" style="width:100%;justify-content:center;">Pair with Anytype</button>`;
         $("#pair-code").focus();
         $("#do-pair").onclick = async () => {
           try {
@@ -183,43 +184,43 @@ async function vOverview() {
   showChrome(true, st.space_name || "");
   setNav("overview");
   setTitle("Overview", st.space_name ? `Workspace · ${st.space_name}` : "Workspace");
-  setActions(`<button class="btn primary" id="ov-new-project">+ New project</button>`);
-  view.innerHTML = `<div class="empty"><span class="big">◌</span>Loading workspace…</div>`;
+  setActions(`<button class="btn btn-default" id="ov-new-project">+ New project</button>`);
+  view.innerHTML = `<div style="display:grid;gap:12px"><div class="skeleton" style="height:118px"></div><div class="skeleton" style="height:64px"></div><div class="skeleton" style="height:168px"></div></div>`;
   let d;
   try { d = await GET("/api/overview"); }
   catch (e) { view.innerHTML = `<div class="empty"><span class="big">⚠</span>${esc(e.message)}</div>`; return; }
 
   const kpis = [
-    ["Projects", d.projects, "tracked in Anytype", "var(--accent)"],
-    ["Open tasks", d.open_tasks, "across all projects", "#d9931e"],
-    ["Completed", d.done_tasks, "shipped", "var(--green)"],
-    ["Overdue", d.overdue, "need attention", "var(--red)"],
+    ["Projects", d.projects, "tracked in Anytype"],
+    ["Open tasks", d.open_tasks, "across all projects"],
+    ["Completed", d.done_tasks, "shipped"],
+    ["Overdue", d.overdue, "need attention"],
   ];
   view.innerHTML = `
     <div class="kpi-grid">
-      ${kpis.map(([l, v, s, c]) => `<div class="kpi" style="--kpi-accent:${c}">
+      ${kpis.map(([l, v, s]) => `<div class="card kpi">
         <div class="k-label">${l}</div><div class="k-value">${v}</div><div class="k-sub">${s}</div></div>`).join("")}
     </div>
     ${d.attention.length ? `
     <div class="section-title">Needs attention</div>
-    <div class="panel" style="padding:8px 10px">
+    <div class="card" style="padding:8px 10px">
       ${d.attention.map((a) => `
         <div class="import-row" data-goto="${esc(a.project_id)}">
-          <span class="pill ${a.overdue ? "overdue" : "today"}">${a.overdue ? "overdue" : "due soon"}</span>
-          <span style="flex:1"><b>${esc(a.title)}</b> <span style="color:var(--faint)">· ${esc(a.project_name)} · ${esc(fmtDate(a.dueMs))}</span></span>
-          <span style="color:var(--faint)">→</span>
+          <span class="badge ${a.overdue ? "badge-destructive" : "badge-warning"}">${a.overdue ? "overdue" : "due soon"}</span>
+          <span style="flex:1"><b>${esc(a.title)}</b> <span style="color:var(--muted-foreground)">· ${esc(a.project_name)} · ${esc(fmtDate(a.dueMs))}</span></span>
+          <span style="color:var(--muted-foreground)">→</span>
         </div>`).join("")}
     </div>` : ""}
     <div class="section-title">Project health</div>
     ${d.project_list.length ? d.project_list.map((p) => `
-      <div class="health-row" data-goto="${p.id}">
+      <div class="card health-row" data-goto="${p.id}">
         <div class="p-ico">${esc(p.icon)}</div>
         <div class="p-main"><div class="p-name">${esc(p.name)}</div>
-          <div class="p-sub">${p.done}/${p.total} tasks done${p.overdue ? ` · <b style="color:var(--red)">${p.overdue} overdue</b>` : ""}</div></div>
-        <div class="pbar"><i style="width:${p.progress}%"></i></div>
-        <div style="font-weight:750;font-variant-numeric:tabular-nums;width:44px;text-align:right">${p.progress}%</div>
+          <div class="p-sub">${p.done}/${p.total} tasks done${p.overdue ? ` · <b style="color:var(--destructive)">${p.overdue} overdue</b>` : ""}</div></div>
+        <div class="progress"><div class="progress-indicator" style="width:${p.progress}%"></div></div>
+        <div style="font-weight:600;font-variant-numeric:tabular-nums;width:44px;text-align:right">${p.progress}%</div>
       </div>`).join("")
-    : `<div class="panel"><div class="empty"><span class="big">▦</span>No projects yet.<br><br><button class="btn primary" id="empty-new">Create your first project</button></div></div>`}`;
+    : `<div class="card"><div class="empty"><span class="big">▦</span>No projects yet.<br><br><button class="btn btn-default" id="empty-new">Create your first project</button></div></div>`}`;
 
   $$("[data-goto]").forEach((el) => { el.onclick = () => { location.hash = `#/projects/${el.dataset.goto}`; }; });
   $("#ov-new-project").onclick = () => projectModal();
@@ -233,26 +234,26 @@ async function vProjects() {
   showChrome(true, st.space_name || "");
   setNav("projects");
   setTitle("Projects", `${st.space_name || ""}`);
-  setActions(`<button class="btn" id="pj-import">⇪ Import</button> <button class="btn primary" id="pj-new">+ New project</button>`);
-  view.innerHTML = `<div class="empty"><span class="big">◌</span>Loading projects…</div>`;
+  setActions(`<button class="btn btn-outline" id="pj-import">⇪ Import</button> <button class="btn btn-default" id="pj-new">+ New project</button>`);
+  view.innerHTML = `<div style="display:grid;gap:16px;grid-template-columns:repeat(auto-fill,minmax(280px,1fr))"><div class="skeleton" style="height:168px"></div><div class="skeleton" style="height:168px"></div><div class="skeleton" style="height:168px"></div></div>`;
   let d;
   try { d = await GET("/api/projects"); }
   catch (e) { view.innerHTML = `<div class="empty"><span class="big">⚠</span>${esc(e.message)}</div>`; return; }
   view.innerHTML = d.projects.length ? `
     <div class="proj-grid">
       ${d.projects.map((p) => `
-        <div class="proj-card" data-goto="${p.id}">
+        <div class="card proj-card" data-goto="${p.id}">
           <div class="p-ico">${esc(p.icon)}</div>
           <h3>${esc(p.name)}</h3>
           <div class="p-desc">${esc(p.notes) || "&nbsp;"}</div>
           <div class="p-foot">
-            <div class="pbar" style="flex:1;min-width:0"><i style="width:${p.progress}%"></i></div>
+            <div class="progress" style="flex:1;min-width:0"><div class="progress-indicator" style="width:${p.progress}%"></div></div>
             <div class="p-counts">${p.done}/${p.total}</div>
-            ${p.source === "imported" ? `<span class="pill imported">imported</span>` : ""}
+            ${p.source === "imported" ? `<span class="badge badge-outline">imported</span>` : ""}
           </div>
         </div>`).join("")}
     </div>`
-    : `<div class="panel"><div class="empty"><span class="big">▦</span>No projects yet — create one to get started.</div></div>`;
+    : `<div class="card"><div class="empty"><span class="big">▦</span>No projects yet — create one to get started.</div></div>`;
   $$("[data-goto]").forEach((el) => { el.onclick = () => { location.hash = `#/projects/${el.dataset.goto}`; }; });
   $("#pj-new").onclick = () => projectModal();
   $("#pj-import").onclick = () => importModal("page");
@@ -264,8 +265,8 @@ function projectModal(existing) {
     ${field("Name", input("name", p.name || ""))}
     ${field("Icon", input("icon", p.icon || "📁", "text", 'maxlength="4"'))}
     ${field("Description", `<textarea name="description" rows="3">${esc(p.notes || "")}</textarea>`)}
-    ${existing ? `<div style="margin-top:14px"><button class="btn danger small" id="m-delete">Delete project</button></div>
-      <div style="font-size:12px;color:var(--faint);margin-top:8px">Tasks stay in Anytype — they are only unlinked from this project.</div>` : ""}`,
+    ${existing ? `<div style="margin-top:14px"><button class="btn btn-destructive btn-sm" id="m-delete">Delete project</button></div>
+      <div style="font-size:12px;color:var(--muted-foreground);margin-top:8px">Tasks stay in Anytype — they are only unlinked from this project.</div>` : ""}`,
     async (d, close) => {
       if (!d.name.trim()) { toast("Project name is required", true); return; }
       if (existing) await PATCH(`/api/projects/${existing.id}`, { name: d.name, description: d.description, icon: d.icon });
@@ -290,9 +291,9 @@ function importModal(kind, projectId) {
   const isTask = kind === "task";
   const isWiki = kind === "wiki";
   openModal(isTask ? "Import tasks" : isWiki ? "Import wiki pages" : "Import project",
-    `<div class="search-row"><input id="imp-q" placeholder="Search your ${isTask ? "tasks" : "pages"} in Anytype…"><button class="btn" id="imp-go">Search</button></div>
+    `<div class="search-row"><input id="imp-q" placeholder="Search your ${isTask ? "tasks" : "pages"} in Anytype…"><button class="btn btn-outline" id="imp-go">Search</button></div>
      <div id="imp-results" style="max-height:300px;overflow:auto"></div>
-     <p style="font-size:12px;color:var(--faint)">Already-tracked items are hidden. Imported items keep living in Anytype — Ascent only links to them.</p>`,
+     <p style="font-size:12px;color:var(--muted-foreground)">Already-tracked items are hidden. Imported items keep living in Anytype — Ascent only links to them.</p>`,
     async (_d, close) => {
       const ids = $$("#imp-results input[type=checkbox]:checked").map((c) => c.value);
       if (!ids.length) { toast("Select at least one item", true); return; }
@@ -371,7 +372,7 @@ async function vProjectDetail(id, tab = "board") {
   view.innerHTML = `<div class="empty"><span class="big">◌</span>Loading project…</div>`;
   let d;
   try { d = await GET(`/api/projects/${id}`); }
-  catch (e) { view.innerHTML = `<div class="empty"><span class="big">⚠</span>${esc(e.message)}<br><br><a class="btn" href="#/projects">Back to projects</a></div>`; return; }
+  catch (e) { view.innerHTML = `<div class="empty"><span class="big">⚠</span>${esc(e.message)}<br><br><a class="btn btn-outline" href="#/projects">Back to projects</a></div>`; return; }
   const p = d.project;
   boardTasks = d.tasks;
   try { wikiArticles = (await GET(`/api/projects/${id}/wiki`)).articles; }
@@ -380,11 +381,11 @@ async function vProjectDetail(id, tab = "board") {
   const done = d.tasks.filter((t) => t.status === "done").length;
   setTitle(p.name, `${done}/${d.tasks.length} tasks · ${wikiArticles.length} wiki article${wikiArticles.length === 1 ? "" : "s"}`);
   setActions(tab === "wiki"
-    ? `<button class="btn" id="pd-import-wiki">⇪ Import pages</button> <button class="btn primary" id="pd-new-article">+ New article</button>`
+    ? `<button class="btn btn-outline btn-sm" id="pd-import-wiki">⇪ Import pages</button> <button class="btn btn-default btn-sm" id="pd-new-article">+ New article</button>`
     : `
-    <button class="btn" id="pd-import">⇪ Import tasks</button>
-    <button class="btn" id="pd-edit">Edit</button>
-    <button class="btn primary" id="pd-new-task">+ New task</button>`);
+    <button class="btn btn-outline btn-sm" id="pd-import">⇪ Import tasks</button>
+    <button class="btn btn-ghost btn-icon" id="pd-edit" title="Edit project">✎</button>
+    <button class="btn btn-default btn-sm" id="pd-new-task">+ New task</button>`);
 
   view.innerHTML = `
     <div class="proj-head">
@@ -400,17 +401,17 @@ async function vProjectDetail(id, tab = "board") {
         </div>
       </div>
     </div>
-    <div class="tabs">
-      <a class="tab ${tab === "board" ? "on" : ""}" href="#/projects/${id}">▦ Board</a>
-      <a class="tab ${tab === "wiki" ? "on" : ""}" href="#/projects/${id}/wiki">📚 Wiki <span class="col-count">${wikiArticles.length}</span></a>
+    <div class="tabs-list" style="margin-bottom:16px">
+      <a class="tabs-trigger ${tab === "board" ? "on" : ""}" href="#/projects/${id}">▦ Board</a>
+      <a class="tabs-trigger ${tab === "wiki" ? "on" : ""}" href="#/projects/${id}/wiki">📚 Wiki <span class="col-count">${wikiArticles.length}</span></a>
     </div>
     <div id="tab-body"></div>`;
 
   if (tab === "wiki") {
     $("#tab-body").innerHTML = `
       <div class="wiki">
-        <aside class="wiki-list panel"><div id="wk-items"></div></aside>
-        <div class="wiki-pane panel" id="wk-pane"></div>
+        <aside class="card wiki-list"><div id="wk-items"></div></aside>
+        <div class="card wiki-pane" id="wk-pane"></div>
       </div>`;
     renderWikiList();
     renderWikiPane();
@@ -442,7 +443,7 @@ function renderWikiList() {
     <div class="wiki-item ${a.id === wikiSel ? "on" : ""}" data-wk="${esc(a.id)}">
       <div class="wk-title">${esc(a.title)}</div>
       ${a.snippet ? `<div class="wk-snip">${esc(a.snippet)}</div>` : ""}
-      ${a.source === "imported" ? `<span class="pill imported">imported</span>` : ""}
+      ${a.source === "imported" ? `<span class="badge badge-outline">imported</span>` : ""}
     </div>`).join("")
     : `<div class="empty" style="padding:24px 12px">No articles yet.<br>Write the first page of this project's wiki.</div>`;
   $$("#wk-items [data-wk]").forEach((el) => { el.onclick = () => selectArticle(el.dataset.wk); });
@@ -480,8 +481,8 @@ function renderWikiPane() {
       ${field("Title", input("wk-title", a.title))}
       ${field("Body (markdown)", `<textarea id="wk-body" rows="18">${esc(a.body)}</textarea>`)}
       <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:14px">
-        <button class="btn ghost" id="wk-cancel">Cancel</button>
-        <button class="btn primary" id="wk-save">Save to Anytype</button>
+        <button class="btn btn-ghost" id="wk-cancel">Cancel</button>
+        <button class="btn btn-default" id="wk-save">Save to Anytype</button>
       </div>`;
     $("#wk-cancel").onclick = () => { wikiEditing = false; renderWikiPane(); };
     $("#wk-save").onclick = async () => {
@@ -503,8 +504,8 @@ function renderWikiPane() {
   pane.innerHTML = `
     <div class="wiki-read-head">
       <h2>${esc(a.title)}</h2>
-      <button class="btn small" id="wk-edit">Edit</button>
-      <button class="btn small danger" id="wk-del">Delete</button>
+      <button class="btn btn-outline btn-sm" id="wk-edit">Edit</button>
+      <button class="btn btn-destructive btn-sm" id="wk-del">Delete</button>
     </div>
     ${a.source === "imported" ? `<div class="wk-imported-note">Imported from Anytype — deleting only unlinks it here; the page itself stays in Anytype.</div>` : ""}
     <div class="markdown">${a.body && a.body.trim() ? md(a.body) : `<div class="empty" style="padding:20px">This article is empty — hit <b>Edit</b> to write it.</div>`}</div>`;
@@ -548,16 +549,16 @@ async function deleteArticle() {
 
 function taskCard(t) {
   const el = document.createElement("div");
-  el.className = "task-card";
+  el.className = "card task-card";
   el.draggable = true;
   el.dataset.tid = t.id;
   el.innerHTML = `
     <div class="task-top">
-      <div class="task-check ${t.status === "done" ? "on" : ""}" data-check="${t.id}">${t.status === "done" ? "✓" : ""}</div>
+      <div class="checkbox task-check ${t.status === "done" ? "on" : ""}" data-check="${t.id}">${t.status === "done" ? "✓" : ""}</div>
       <div class="task-title ${t.status === "done" ? "done" : ""}">${esc(t.title)}</div>
     </div>
     ${t.notes ? `<div class="task-notes">${esc(t.notes)}</div>` : ""}
-    <div class="task-meta">${duePill(t)}${t.source === "imported" ? `<span class="pill imported">imported</span>` : ""}</div>`;
+    <div class="task-meta">${duePill(t)}${t.source === "imported" ? `<span class="badge badge-outline">imported</span>` : ""}</div>`;
   el.querySelector("[data-check]").onclick = async (e) => {
     e.stopPropagation();
     try {
@@ -622,7 +623,7 @@ function taskModal(pid, existing) {
       ${field("Due date", input("due_date", isoDate(t.dueMs), "date"))}
     </div>
     ${field("Notes", `<textarea name="notes" rows="3">${esc(t.notes || "")}</textarea>`)}
-    ${existing ? `<div style="margin-top:14px"><button class="btn danger small" id="m-delete">Delete task</button></div>
+    ${existing ? `<div style="margin-top:14px"><button class="btn btn-destructive btn-sm" id="m-delete">Delete task</button></div>
       ${t.source === "ascent" ? `<div style="font-size:12px;color:var(--faint);margin-top:8px">Also removes the task object from Anytype.</div>`
         : `<div style="font-size:12px;color:var(--faint);margin-top:8px">Only unlinks — the task stays in Anytype.</div>`}` : ""}
     <div style="font-size:12px;color:var(--faint);margin-top:10px">Saved as a native Anytype task object.</div>`,
@@ -677,4 +678,4 @@ window.addEventListener("hashchange", route);
 route();
 
 // test seam
-globalThis.__test = { taskCard, duePill, fmtDate, COLUMNS, md };
+globalThis.__test = { taskCard, duePill, fmtDate, COLUMNS, md, vOverview, vProjects, vProjectDetail, vSetup, renderSetup, renderWikiList, renderWikiPane, selectArticle, openModal, projectModal, taskModal, importModal };

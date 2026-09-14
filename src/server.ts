@@ -1,4 +1,4 @@
-// Ascent — glossy project management over the Anytype local API.
+// Ascent — project management over the Anytype local API (shadcn/ui Zinc visual port).
 // Bun + zero dependencies. All project/task/article content lives in the user's
 // Anytype space; data/links.json only remembers which task/article belongs to
 // which project (and each card's kanban column), plus the pairing config.

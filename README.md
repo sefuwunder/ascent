@@ -1,6 +1,6 @@
 # ◭ Ascent
 
-Simple & elegant glossy project management with **Anytype as the data backend**. Every project is a native Anytype page, every task a native Anytype task, every wiki article a native Anytype page — created, read, updated and deleted through the official local API (`2025-11-08`). Your data never leaves your machine.
+Simple Simple & elegant glossy project management elegant project management with **Anytype as the data backend**. Every project is a native Anytype page, every task a native Anytype task, every wiki article a native Anytype page — created, read, updated and deleted through the official local API (`2025-11-08`). Your data never leaves your machine.
 
 Bun + zero npm dependencies. Runs on port **3004**.
 
@@ -45,6 +45,10 @@ Already track work in Anytype? Use **Import** on the Projects page or inside a p
 ### Project wiki
 
 Each project has a **Wiki** tab next to its kanban board: a lightweight knowledge base of markdown articles (runbooks, specs, meeting notes) stored as native Anytype pages, so they're searchable and editable in Anytype itself. Articles render headings, lists, code blocks, quotes, links and inline formatting; the editor is plain markdown. You can also import existing Anytype pages into a project's wiki — same rule as tasks: imported pages are unlinked, never deleted.
+
+### Design system
+
+Ascent's UI is a **dependency-free visual port of [shadcn/ui](https://ui.shadcn.com)'s Zinc design system** — CSS-variable theming, card anatomy, button variants/sizes, badges, dialogs, tabs, checkbox, progress, separators, skeletons, avatar, table, dropdown menu, and toast — recreated in vanilla CSS with zero dependencies and no build step. This is not a shadcn/React installation: there is no Tailwind, no Radix, no bundler.
 
 ### API
 
