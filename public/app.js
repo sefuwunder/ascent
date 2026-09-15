@@ -1262,7 +1262,7 @@ function tblRowHtml(t, d) {
   const chev = hasKids
     ? `<button class="tt-chev" data-chev="${esc(t.id)}" title="${open ? "Collapse prerequisites" : "Expand prerequisites"}">${open ? "▾" : "▸"}</button>`
     : `<span class="tt-chev-sp"></span>`;
-  return `<tr data-row="${esc(t.id)}">
+  return `<tr data-row="${esc(t.id)}" draggable="true">
     <td data-act="title" style="padding-left:${10 + d * 22}px">${chev}<span class="tt-title ${t.status === "done" ? "done" : ""}">${esc(t.title)}</span>${t.child_count ? ` <span class="badge badge-secondary tt-kids">▸ ${t.child_count}</span>` : ""}</td>
     <td data-act="status">${statusPill(t.status)}</td>
     <td data-act="due">${tblDueCell(t)}</td>
@@ -1321,6 +1321,7 @@ function renderTable() {
       <input id="tt-search" class="tt-search" placeholder="Filter ${boardTasks.length} tasks…" value="${esc(tblQuery)}" autocomplete="off">
       <span class="tt-count" id="tt-count"></span>
     </div>
+    <div class="tt-unnest-zone" id="tt-unnest">⤴ Drop here to move to top level</div>
     <div class="card tt-wrap">
       <table class="ttable">
         <thead><tr>
@@ -1345,8 +1346,7 @@ function renderTable() {
       drawRows();
     };
   });
-  $("#tt-body").addEventListener("click", (e) => {
-    const chev = e.target.closest("[data-chev]");
+  $("#tt-body").addEventListener("click", (e) => {    const chev = e.target.closest("[data-chev]");
     if (chev) {
       toggleTblCollapse(chev.dataset.chev);
       tblSaveCollapsed(pid);
@@ -1366,6 +1366,23 @@ function renderTable() {
     else if (act === "status") editStatusInline(td, t);
     else if (act === "due") editDueInline(td, t);
   });
+  /* HTML5 drag-and-drop nesting (delegated; plain clicks still hit the
+     click handler above — a drag only starts after the mouse moves). */
+  const tbody = $("#tt-body");
+  tbody.addEventListener("dragstart", tblDragStart);
+  tbody.addEventListener("dragover", tblDragOver);
+  tbody.addEventListener("dragleave", tblDragLeave);
+  tbody.addEventListener("drop", tblDrop);
+  if (!tblDocDragEndWired) {
+    tblDocDragEndWired = true;
+    document.addEventListener("dragend", tblDragEnd); // rows may be re-rendered mid-drag
+  }
+  const zone = $("#tt-unnest");
+  if (zone) {
+    zone.addEventListener("dragover", ttUnnestOver);
+    zone.addEventListener("dragleave", ttUnnestLeave);
+    zone.addEventListener("drop", ttUnnestDrop);
+  }
 }
 
 /* Inline editors (event-delegated; Enter saves, Esc cancels). */
@@ -1477,10 +1494,9 @@ function openRowMenu(btn) {
   };
   setTimeout(() => document.addEventListener("click", closeRowMenu, { once: true }), 0);
 }
-function nestPicker(tid, onDone) {
-  const t = boardTasks.find((x) => x.id === tid);
-  if (!t) return;
-  // Banned from candidacy: self, descendants, and ancestors (all would cycle).
+/* IDs that task `tid` may not be nested under: itself, its descendants,
+   and its ancestors — any of those would create a cycle. */
+function prereqBannedIds(tid) {
   const banned = new Set([tid]);
   const stack = [tid];
   while (stack.length) {
@@ -1489,8 +1505,15 @@ function nestPicker(tid, onDone) {
       if (x.parent_id === cur && !banned.has(x.id)) { banned.add(x.id); stack.push(x.id); }
     }
   }
-  let cur = t.parent_id;
+  let cur = (boardTasks.find((x) => x.id === tid) || {}).parent_id;
   while (cur) { banned.add(cur); const p = boardTasks.find((x) => x.id === cur); cur = p ? p.parent_id : null; }
+  return banned;
+}
+function nestPicker(tid, onDone) {
+  const t = boardTasks.find((x) => x.id === tid);
+  if (!t) return;
+  // Banned from candidacy: self, descendants, and ancestors (all would cycle).
+  const banned = prereqBannedIds(tid);
   const root = $("#modal-root");
   root.innerHTML = `
     <div class="dialog-overlay" id="ovl"><div class="dialog-content" role="dialog" aria-modal="true">
@@ -1524,6 +1547,118 @@ function nestPicker(tid, onDone) {
   $("#pk-search").oninput = draw;
   draw();
   setTimeout(() => $("#pk-search").focus(), 60);
+}
+
+/* ---------- table drag-and-drop nesting ---------- */
+let tblDragId = null;
+let tblDocDragEndWired = false;
+
+function tblRowOf(e) { return e.target && e.target.closest ? e.target.closest("tr[data-row]") : null; }
+
+/* Why is this drop rejected? "self" | "desc" | "anc" | null */
+function tblNestRejectReason(tid, targetId) {
+  if (targetId === tid) return "self";
+  const seen = new Set([tid]);
+  const stack = [tid];
+  while (stack.length) {
+    const cur = stack.pop();
+    for (const x of boardTasks) {
+      if (x.parent_id === cur && !seen.has(x.id)) {
+        if (x.id === targetId) return "desc";
+        seen.add(x.id); stack.push(x.id);
+      }
+    }
+  }
+  let cur = (boardTasks.find((x) => x.id === tid) || {}).parent_id;
+  while (cur) {
+    if (cur === targetId) return "anc";
+    const p = boardTasks.find((x) => x.id === cur);
+    cur = p ? p.parent_id : null;
+  }
+  return null;
+}
+
+function tblDragStart(e) {
+  const tr = tblRowOf(e);
+  if (!tr) return;
+  tblDragId = tr.dataset.row;
+  try { e.dataTransfer.setData("text/plain", tblDragId); } catch (err) {} // required by Firefox
+  e.dataTransfer.effectAllowed = "move";
+  tr.classList.add("tt-dragging");
+  const zone = $("#tt-unnest");
+  if (zone) zone.classList.add("show");
+}
+
+function tblDragOver(e) {
+  if (!tblDragId) return;
+  const tr = tblRowOf(e);
+  if (!tr) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = "move";
+  const ok = !tblNestRejectReason(tblDragId, tr.dataset.row);
+  tr.classList.toggle("tt-drop-ok", ok);
+  tr.classList.toggle("tt-drop-bad", !ok);
+}
+
+function tblDragLeave(e) {
+  const tr = tblRowOf(e);
+  if (tr) tr.classList.remove("tt-drop-ok", "tt-drop-bad");
+}
+
+function tblDragEnd() {
+  tblDragId = null;
+  $$("#tt-body tr.tt-dragging, #tt-body tr.tt-drop-ok, #tt-body tr.tt-drop-bad")
+    .forEach((tr) => tr.classList.remove("tt-dragging", "tt-drop-ok", "tt-drop-bad"));
+  const zone = $("#tt-unnest");
+  if (zone) zone.classList.remove("show", "tt-drop-ok");
+}
+
+async function tblDrop(e) {
+  if (!tblDragId) return;
+  const tr = tblRowOf(e);
+  if (!tr) return;
+  e.preventDefault();
+  const targetId = tr.dataset.row;
+  const reason = tblNestRejectReason(tblDragId, targetId);
+  const dragId = tblDragId;
+  tblDragEnd();
+  if (reason) {
+    toast(reason === "anc" ? "That would create a cycle" : "Can't nest a task inside itself or its own subtasks", true);
+    return;
+  }
+  await moveTaskNesting(dragId, targetId);
+}
+
+async function moveTaskNesting(tid, parentId) {
+  try {
+    await PATCH(`/api/tasks/${tid}/parent`, { parent_id: parentId });
+    await refreshTasks(currentPid());
+    if (parentId) {
+      const p = boardTasks.find((x) => x.id === parentId);
+      toast(`Moved under “${p ? p.title : "task"}”`);
+    } else {
+      toast("Moved to top level");
+    }
+  } catch (e) {
+    toast(e.message, true);
+    await refreshTasks(currentPid()); // revert to server truth
+  }
+}
+
+/* Top-level drop zone: dragging onto it unnests the task. */
+function ttUnnestOver(e) {
+  if (!tblDragId) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = "move";
+  e.currentTarget.classList.add("tt-drop-ok");
+}
+function ttUnnestLeave(e) { e.currentTarget.classList.remove("tt-drop-ok"); }
+async function ttUnnestDrop(e) {
+  if (!tblDragId) return;
+  e.preventDefault();
+  const dragId = tblDragId;
+  tblDragEnd();
+  await moveTaskNesting(dragId, null);
 }
 
 /* Prerequisites section inside the task detail modal. */
@@ -1583,5 +1718,8 @@ globalThis.__test = { taskCard, duePill, fmtDate, COLUMNS, md, vOverview, vProje
   tblSet: (s) => { if (s.sort) tblSort = s.sort; if (s.query !== undefined) tblQuery = s.query; if (s.collapsed) tblCollapsed = s.collapsed; },
   taskChildren, checkPrereqsDone, refreshTasks, nestPicker, openRowMenu, prereqBoxHtml,
   tblSaveCollapsed, tblLoadCollapsed,
+  prereqBannedIds, tblNestRejectReason, moveTaskNesting,
+  tblDragStart, tblDragOver, tblDragLeave, tblDrop, tblDragEnd,
+  ttUnnestOver, ttUnnestLeave, ttUnnestDrop, tblDragIdOf: () => tblDragId,
   setBoardTasks: (t) => { boardTasks = t; }, boardTasksOf: () => boardTasks,
   setPid: (p) => { _pid = p; } };

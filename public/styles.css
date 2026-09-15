@@ -660,6 +660,18 @@ td[data-act="due"] { cursor: pointer; white-space: nowrap; }
 }
 .tt-menu button:hover { background: var(--muted); }
 .tt-edit { width: 100%; font-size: 13px; padding: 4px 6px; }
+/* drag-and-drop nesting */
+.ttable tbody tr[draggable="true"] { cursor: grab; }
+.ttable tbody tr.tt-dragging { opacity: 0.4; cursor: grabbing; }
+.ttable tbody tr.tt-drop-ok { box-shadow: inset 0 0 0 2px var(--sol-blue); background: color-mix(in srgb, var(--sol-blue) 12%, transparent); }
+.ttable tbody tr.tt-drop-bad { cursor: not-allowed; box-shadow: inset 0 0 0 2px var(--sol-red); }
+.tt-unnest-zone {
+  display: none; margin-bottom: 10px; padding: 10px;
+  border: 2px dashed var(--border); border-radius: 8px; text-align: center;
+  color: var(--muted-foreground); font-size: 13px;
+}
+.tt-unnest-zone.show { display: block; }
+.tt-unnest-zone.tt-drop-ok { border-color: var(--sol-blue); color: var(--sol-blue); background: color-mix(in srgb, var(--sol-blue) 8%, transparent); }
 /* prerequisites box in the task detail modal */
 .prereq-box { margin-top: 14px; border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
 .prereq-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 0; }
