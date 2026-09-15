@@ -906,6 +906,7 @@ async function vProjectDetail(id, tab = "board") {
     </div>
     <div class="tabs-list" style="margin-bottom:16px">
       <a class="tabs-trigger ${tab === "board" ? "on" : ""}" href="#/projects/${id}">▦ Board</a>
+      <a class="tabs-trigger ${tab === "table" ? "on" : ""}" href="#/projects/${id}/table">▤ Table</a>
       <a class="tabs-trigger ${tab === "wiki" ? "on" : ""}" href="#/projects/${id}/wiki">📚 Wiki <span class="col-count">${wikiArticles.length}</span></a>
     </div>
     <div id="tab-body"></div>`;
@@ -923,15 +924,19 @@ async function vProjectDetail(id, tab = "board") {
     return;
   }
 
-  $("#tab-body").innerHTML = `
-    <div class="board" id="board">
-      ${COLUMNS.map(([key, label, color]) => `
-        <div class="kanban-col" data-col="${key}">
-          <div class="col-head"><span class="col-dot" style="background:${color}"></span>${label}<span class="col-count" id="count-${key}"></span><span class="col-est" id="est-${key}"></span></div>
-          <div class="col-body" data-col="${key}"></div>
-        </div>`).join("")}
-    </div>`;
-  renderBoard();
+  if (tab === "table") {
+    renderTable();
+  } else {
+    $("#tab-body").innerHTML = `
+      <div class="board" id="board">
+        ${COLUMNS.map(([key, label, color]) => `
+          <div class="kanban-col" data-col="${key}">
+            <div class="col-head"><span class="col-dot" style="background:${color}"></span>${label}<span class="col-count" id="count-${key}"></span><span class="col-est" id="est-${key}"></span></div>
+            <div class="col-body" data-col="${key}"></div>
+          </div>`).join("")}
+      </div>`;
+    renderBoard();
+  }
 
   $("#pd-new-task").onclick = () => taskModal(id);
   $("#pd-edit").onclick = () => projectModal(p);
@@ -1063,9 +1068,10 @@ function taskCard(t) {
       <div class="task-title ${t.status === "done" ? "done" : ""}">${esc(t.title)}</div>
     </div>
     ${t.notes ? `<div class="task-notes">${esc(t.notes)}</div>` : ""}
-    <div class="task-meta">${Estimate.estChip(t.title)}${duePill(t)}${t.source === "imported" ? `<span class="badge badge-outline">imported</span>` : ""}</div>`;
+    <div class="task-meta">${Estimate.estChip(t.title)}${duePill(t)}${t.child_count ? `<span class="badge badge-secondary" title="${t.child_count} prerequisite${t.child_count === 1 ? "" : "s"}">▸ ${t.child_count}</span>` : ""}${t.source === "imported" ? `<span class="badge badge-outline">imported</span>` : ""}</div>`;
   el.querySelector("[data-check]").onclick = async (e) => {
     e.stopPropagation();
+    if (t.status !== "done" && !checkPrereqsDone(t)) return;
     try {
       const { task } = await PATCH(`/api/tasks/${t.id}`, { done: t.status !== "done" });
       boardTasks = boardTasks.map((x) => (x.id === t.id ? task : x));
@@ -1105,6 +1111,7 @@ function renderBoard() {
       const target = col.dataset.col;
       const t = boardTasks.find((x) => x.id === tid);
       if (!t || t.status === target) return;
+      if (target === "done" && !checkPrereqsDone(t)) return;
       const prev = t.status;
       t.status = target; // optimistic
       renderBoard();
@@ -1131,6 +1138,7 @@ function taskModal(pid, existing) {
       ${field("Due date", input("due_date", isoDate(t.dueMs), "date"))}
     </div>
     ${field("Notes", `<textarea name="notes" rows="3">${esc(t.notes || "")}</textarea>`)}
+    ${existing ? prereqBoxHtml(t) : ""}
     ${existing ? `<div style="margin-top:14px"><button class="btn btn-destructive btn-sm" id="m-delete">Delete task</button></div>
       ${t.source === "ascent" ? `<div style="font-size:12px;color:var(--muted-foreground);margin-top:8px">Also removes the task object from Anytype.</div>`
         : `<div style="font-size:12px;color:var(--muted-foreground);margin-top:8px">Only unlinks — the task stays in Anytype.</div>`}` : ""}
@@ -1139,6 +1147,7 @@ function taskModal(pid, existing) {
       if (!d.title.trim()) { toast("Task title is required", true); return; }
       const payload = { title: d.title, notes: d.notes, due_date: d.due_date, status: d.status };
       if (existing) {
+        if (d.status === "done" && existing.status !== "done" && !checkPrereqsDone(existing)) return;
         const { task } = await PATCH(`/api/tasks/${existing.id}`, payload);
         boardTasks = boardTasks.map((x) => (x.id === existing.id ? task : x));
       } else {
@@ -1147,7 +1156,7 @@ function taskModal(pid, existing) {
       }
       close();
       toast(existing ? "Task updated in Anytype" : "Task created in Anytype");
-      renderBoard();
+      await refreshTasks(pid);
       const p = await GET(`/api/projects/${pid}`).catch(() => null);
       if (p) setTitle(p.project.name, `${p.tasks.filter((x) => x.status === "done").length}/${p.tasks.length} tasks complete`);
     }, existing ? "Save changes" : "Create task");
@@ -1162,12 +1171,373 @@ function taskModal(pid, existing) {
     if (!confirm(`Delete “${existing.title}”?`)) return;
     try {
       await DEL(`/api/tasks/${existing.id}`);
-      boardTasks = boardTasks.filter((x) => x.id !== existing.id);
       $("#modal-root").innerHTML = "";
       toast("Task deleted");
-      renderBoard();
+      await refreshTasks(pid);
     } catch (e) { toast(e.message, true); }
   };
+  const nestBtn = $("#m-nest");
+  if (nestBtn) nestBtn.onclick = () => nestPicker(existing.id, () => taskModal(pid, boardTasks.find((x) => x.id === existing.id) || existing));
+  $$("#modal-root [data-unnest]").forEach((b) => {
+    b.onclick = async () => {
+      try {
+        await PATCH(`/api/tasks/${b.dataset.unnest}/parent`, { parent_id: null });
+        await refreshTasks(pid);
+        taskModal(pid, boardTasks.find((x) => x.id === existing.id));
+      } catch (e) { toast(e.message, true); }
+    };
+  });
+}
+
+/* ---------- table view: colorful spreadsheet + nested prerequisites ---------- */
+let tblSort = { key: "due", dir: "asc" };
+let tblQuery = "";
+let tblCollapsed = new Set();
+let tblTreeCache = null;
+
+function tblLoadCollapsed(pid) {
+  try { tblCollapsed = new Set(Object.keys(JSON.parse(localStorage.getItem("ascent-table-collapse:" + pid) || "{}"))); }
+  catch (e) { tblCollapsed = new Set(); }
+}
+function tblSaveCollapsed(pid) {
+  try { localStorage.setItem("ascent-table-collapse:" + pid, JSON.stringify(Object.fromEntries([...tblCollapsed].map((x) => [x, 1])))); } catch (e) {}
+}
+
+/* Shared prerequisite helpers (kanban + table both use these). */
+function taskChildren(tid) { return boardTasks.filter((x) => x.parent_id === tid); }
+function checkPrereqsDone(t) {
+  const kids = taskChildren(t.id).filter((x) => x.status !== "done");
+  if (!kids.length) return true;
+  const names = kids.slice(0, 3).map((k) => `“${k.title}”`).join(", ") + (kids.length > 3 ? ", …" : "");
+  return confirm(`${kids.length} prerequisite${kids.length === 1 ? "" : "s"} still incomplete: ${names}\n\nMark “${t.title}” done anyway?`);
+}
+async function refreshTasks(pid) {
+  try { boardTasks = (await GET(`/api/projects/${pid}/tasks`)).tasks; } catch (e) { toast(e.message, true); return; }
+  if ($("#board")) renderBoard();
+  if ($("#tt-body")) { tblTreeCache = buildTaskTree(boardTasks); drawRows(); }
+}
+
+function buildTaskTree(tasks) {
+  const byId = new Map(tasks.map((t) => [t.id, t]));
+  const children = new Map();
+  const roots = [];
+  for (const t of tasks) {
+    const p = t.parent_id && byId.has(t.parent_id) ? t.parent_id : null;
+    if (p) { if (!children.has(p)) children.set(p, []); children.get(p).push(t); }
+    else roots.push(t);
+  }
+  const depth = new Map();
+  const walk = (list, d) => {
+    for (const t of list) { depth.set(t.id, d); const c = children.get(t.id); if (c) walk(c, d + 1); }
+  };
+  walk(roots, 0);
+  return { byId, children, roots, depth };
+}
+
+const STATUS_RANK = { backlog: 0, in_progress: 1, review: 2, done: 3 };
+function tblCmp(a, b) {
+  const { key, dir } = tblSort;
+  let r = 0;
+  if (key === "title") r = String(a.title).localeCompare(String(b.title));
+  else if (key === "status") r = ((STATUS_RANK[a.status] ?? 9) - (STATUS_RANK[b.status] ?? 9)) || String(a.title).localeCompare(String(b.title));
+  else r = ((a.dueMs || Infinity) - (b.dueMs || Infinity)) || String(a.title).localeCompare(String(b.title));
+  return dir === "desc" ? -r : r;
+}
+
+function statusPill(s) {
+  return `<span class="st-pill st-${esc(s)}" title="Click to change status">${esc(colName(s))}</span>`;
+}
+function tblDueCell(t) {
+  if (!t.dueMs) return `<span class="tt-due-empty">—</span>`;
+  const start = new Date(); start.setHours(0, 0, 0, 0);
+  const cls = t.status === "done" ? "tt-due-done"
+    : t.dueMs < start.getTime() ? "tt-due-overdue"
+    : t.dueMs < start.getTime() + 86400000 ? "tt-due-today" : "tt-due-future";
+  return `<span class="${cls}">${esc(fmtDate(t.dueMs))}</span>`;
+}
+
+function tblRowHtml(t, d) {
+  const hasKids = (t.child_count || 0) > 0;
+  const open = !tblCollapsed.has(t.id);
+  const chev = hasKids
+    ? `<button class="tt-chev" data-chev="${esc(t.id)}" title="${open ? "Collapse prerequisites" : "Expand prerequisites"}">${open ? "▾" : "▸"}</button>`
+    : `<span class="tt-chev-sp"></span>`;
+  return `<tr data-row="${esc(t.id)}">
+    <td data-act="title" style="padding-left:${10 + d * 22}px">${chev}<span class="tt-title ${t.status === "done" ? "done" : ""}">${esc(t.title)}</span>${t.child_count ? ` <span class="badge badge-secondary tt-kids">▸ ${t.child_count}</span>` : ""}</td>
+    <td data-act="status">${statusPill(t.status)}</td>
+    <td data-act="due">${tblDueCell(t)}</td>
+    <td>${t.source === "imported" ? `<span class="badge badge-outline">imported</span>` : ""}</td>
+    <td class="tt-notes" title="${esc(t.notes || "")}">${esc((t.notes || "").slice(0, 90))}</td>
+    <td class="tt-menu-cell"><button class="btn btn-ghost btn-icon tt-menu-btn" data-menu="${esc(t.id)}" title="Row actions">⋯</button></td>
+  </tr>`;
+}
+
+function toggleTblCollapse(tid) {
+  if (tblCollapsed.has(tid)) tblCollapsed.delete(tid); else tblCollapsed.add(tid);
+}
+function drawRows() {
+  const tbody = $("#tt-body");
+  if (!tbody || !tblTreeCache) return;
+  const { children, roots, depth } = tblTreeCache;
+  let rows;
+  if (tblQuery) {
+    const q = tblQuery.toLowerCase();
+    rows = boardTasks
+      .filter((t) => String(t.title).toLowerCase().includes(q) || String(t.notes || "").toLowerCase().includes(q))
+      .slice().sort(tblCmp).map((t) => ({ t, d: depth.get(t.id) || 0 }));
+  } else {
+    const ch = new Map();
+    for (const [k, v] of children) ch.set(k, v.slice().sort(tblCmp));
+    rows = [];
+    const walk = (list, d) => {
+      for (const t of list) {
+        rows.push({ t, d });
+        const c = ch.get(t.id);
+        if (c && !tblCollapsed.has(t.id)) walk(c, d + 1);
+      }
+    };
+    walk(roots.slice().sort(tblCmp), 0);
+  }
+  tbody.innerHTML = rows.length
+    ? rows.map(({ t, d }) => tblRowHtml(t, d)).join("")
+    : `<tr><td colspan="6"><div class="empty" style="padding:24px">No tasks match.</div></td></tr>`;
+  const cnt = $("#tt-count");
+  if (cnt) cnt.textContent = `${rows.length} of ${boardTasks.length} shown`;
+  $$("#tab-body th[data-sort]").forEach((th) => {
+    const k = th.dataset.sort;
+    const base = th.textContent.replace(/ [▲▼]$/, "");
+    th.textContent = base + (tblSort.key === k ? (tblSort.dir === "asc" ? " ▲" : " ▼") : "");
+    th.classList.toggle("sorted", tblSort.key === k);
+  });
+}
+
+function renderTable() {
+  const pid = currentPid();
+  tblLoadCollapsed(pid);
+  tblTreeCache = buildTaskTree(boardTasks);
+  const body = $("#tab-body");
+  body.innerHTML = `
+    <div class="tt-toolbar">
+      <input id="tt-search" class="tt-search" placeholder="Filter ${boardTasks.length} tasks…" value="${esc(tblQuery)}" autocomplete="off">
+      <span class="tt-count" id="tt-count"></span>
+    </div>
+    <div class="card tt-wrap">
+      <table class="ttable">
+        <thead><tr>
+          <th data-sort="title">Task</th>
+          <th data-sort="status">Status</th>
+          <th data-sort="due">Due</th>
+          <th>Source</th>
+          <th>Notes</th>
+          <th style="width:44px"></th>
+        </tr></thead>
+        <tbody id="tt-body"></tbody>
+      </table>
+    </div>`;
+  drawRows();
+  const search = $("#tt-search");
+  search.oninput = () => { tblQuery = search.value; drawRows(); };
+  $$("#tab-body th[data-sort]").forEach((th) => {
+    th.onclick = () => {
+      const k = th.dataset.sort;
+      if (tblSort.key === k) tblSort.dir = tblSort.dir === "asc" ? "desc" : "asc";
+      else tblSort = { key: k, dir: "asc" };
+      drawRows();
+    };
+  });
+  $("#tt-body").addEventListener("click", (e) => {
+    const chev = e.target.closest("[data-chev]");
+    if (chev) {
+      toggleTblCollapse(chev.dataset.chev);
+      tblSaveCollapsed(pid);
+      drawRows();
+      return;
+    }
+    const menuBtn = e.target.closest("[data-menu]");
+    if (menuBtn) { openRowMenu(menuBtn); return; }
+    const tr = e.target.closest("tr[data-row]");
+    if (!tr || e.target.closest(".tt-edit, select, input")) return;
+    const t = boardTasks.find((x) => x.id === tr.dataset.row);
+    if (!t) return;
+    const td = e.target.closest("td[data-act]");
+    if (!td) return;
+    const act = td.dataset.act;
+    if (act === "title") editTitleInline(td, t);
+    else if (act === "status") editStatusInline(td, t);
+    else if (act === "due") editDueInline(td, t);
+  });
+}
+
+/* Inline editors (event-delegated; Enter saves, Esc cancels). */
+function editTitleInline(td, t) {
+  if (td.querySelector(".tt-edit")) return;
+  const old = t.title;
+  td.innerHTML = `<input class="tt-edit" value="${esc(old)}">`;
+  const inp = td.querySelector("input");
+  inp.focus(); inp.select();
+  let done = false;
+  const finish = async (save) => {
+    if (done) return; done = true;
+    const val = inp.value.trim();
+    if (save && val && val !== old) {
+      try {
+        const { task } = await PATCH(`/api/tasks/${t.id}`, { title: val });
+        boardTasks = boardTasks.map((x) => (x.id === t.id ? task : x));
+        tblTreeCache = buildTaskTree(boardTasks);
+      } catch (e) { toast(e.message, true); }
+    }
+    drawRows();
+  };
+  inp.onkeydown = (e) => {
+    e.stopPropagation();
+    if (e.key === "Enter") finish(true);
+    else if (e.key === "Escape") finish(false);
+  };
+  inp.onblur = () => finish(true);
+}
+function editStatusInline(td, t) {
+  if (td.querySelector("select")) return;
+  const old = t.status;
+  const sel = document.createElement("select");
+  sel.className = "tt-edit";
+  sel.innerHTML = COLUMNS.map(([v, l]) => `<option value="${v}" ${v === old ? "selected" : ""}>${esc(l)}</option>`).join("");
+  td.innerHTML = "";
+  td.appendChild(sel);
+  sel.focus();
+  let done = false;
+  const finish = async (save) => {
+    if (done) return; done = true;
+    const val = sel.value;
+    if (save && val !== old) {
+      if (val === "done" && !checkPrereqsDone(t)) { drawRows(); return; }
+      try {
+        const { task } = await PATCH(`/api/tasks/${t.id}`, { status: val });
+        boardTasks = boardTasks.map((x) => (x.id === t.id ? task : x));
+        tblTreeCache = buildTaskTree(boardTasks);
+      } catch (e) { toast(e.message, true); }
+    }
+    drawRows();
+  };
+  sel.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Escape") finish(false); };
+  sel.onchange = () => finish(true);
+  sel.onblur = () => finish(false);
+}
+function editDueInline(td, t) {
+  if (td.querySelector("input")) return;
+  const inp = document.createElement("input");
+  inp.type = "date";
+  inp.className = "tt-edit";
+  inp.value = isoDate(t.dueMs);
+  td.innerHTML = "";
+  td.appendChild(inp);
+  inp.focus();
+  let done = false;
+  const finish = async (save) => {
+    if (done) return; done = true;
+    const val = inp.value;
+    if (save && val !== isoDate(t.dueMs)) {
+      try {
+        const { task } = await PATCH(`/api/tasks/${t.id}`, { due_date: val });
+        boardTasks = boardTasks.map((x) => (x.id === t.id ? task : x));
+        tblTreeCache = buildTaskTree(boardTasks);
+      } catch (e) { toast(e.message, true); }
+    }
+    drawRows();
+  };
+  inp.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") finish(true); else if (e.key === "Escape") finish(false); };
+  inp.onblur = () => finish(true);
+}
+
+/* Row actions menu + nest picker. */
+function closeRowMenu() { const m = $(".tt-menu"); if (m) m.remove(); }
+function openRowMenu(btn) {
+  const wasOpen = !!btn.parentElement.querySelector(".tt-menu");
+  closeRowMenu();
+  if (wasOpen) return;
+  const tid = btn.dataset.menu;
+  const t = boardTasks.find((x) => x.id === tid);
+  if (!t) return;
+  const div = document.createElement("div");
+  div.className = "tt-menu";
+  div.innerHTML = `
+    <button data-m="nest">Nest under…</button>
+    ${t.parent_id ? `<button data-m="unnest">Remove from parent</button>` : ""}
+    <button data-m="detail">Open details</button>`;
+  btn.parentElement.style.position = "relative";
+  btn.parentElement.appendChild(div);
+  div.onclick = async (e) => {
+    const m = e.target.closest("[data-m]") && e.target.closest("[data-m]").dataset.m;
+    closeRowMenu();
+    if (!m) return;
+    if (m === "nest") nestPicker(tid);
+    else if (m === "unnest") {
+      try { await PATCH(`/api/tasks/${tid}/parent`, { parent_id: null }); await refreshTasks(currentPid()); toast("Removed from parent"); }
+      catch (err) { toast(err.message, true); }
+    } else if (m === "detail") taskModal(currentPid(), boardTasks.find((x) => x.id === tid));
+  };
+  setTimeout(() => document.addEventListener("click", closeRowMenu, { once: true }), 0);
+}
+function nestPicker(tid, onDone) {
+  const t = boardTasks.find((x) => x.id === tid);
+  if (!t) return;
+  // Banned from candidacy: self, descendants, and ancestors (all would cycle).
+  const banned = new Set([tid]);
+  const stack = [tid];
+  while (stack.length) {
+    const cur = stack.pop();
+    for (const x of boardTasks) {
+      if (x.parent_id === cur && !banned.has(x.id)) { banned.add(x.id); stack.push(x.id); }
+    }
+  }
+  let cur = t.parent_id;
+  while (cur) { banned.add(cur); const p = boardTasks.find((x) => x.id === cur); cur = p ? p.parent_id : null; }
+  const root = $("#modal-root");
+  root.innerHTML = `
+    <div class="dialog-overlay" id="ovl"><div class="dialog-content" role="dialog" aria-modal="true">
+      <h2 class="dialog-title">Nest “${esc(t.title)}” under…</h2>
+      <input id="pk-search" placeholder="Filter tasks…" autocomplete="off" style="margin-bottom:10px">
+      <div id="pk-list" style="max-height:40vh;overflow:auto"></div>
+      <div class="dialog-footer"><button class="btn btn-ghost" id="m-cancel">Cancel</button></div>
+    </div></div>`;
+  const close = () => { root.innerHTML = ""; };
+  $("#m-cancel").onclick = close;
+  $("#ovl").addEventListener("mousedown", (e) => { if (e.target.id === "ovl") close(); });
+  const draw = () => {
+    const q = ($("#pk-search").value || "").toLowerCase();
+    const cands = boardTasks.filter((x) => !banned.has(x.id) && String(x.title).toLowerCase().includes(q));
+    $("#pk-list").innerHTML = cands.length ? cands.map((x) => `
+      <button class="import-row" data-pk="${esc(x.id)}" style="width:100%;text-align:left;cursor:pointer;background:none;border:none;color:inherit;font:inherit">
+        <span>${esc(x.title)}</span> <span class="badge badge-secondary">${esc(colName(x.status))}</span>
+      </button>`).join("") : `<div class="empty" style="padding:16px">No eligible tasks.</div>`;
+    $$("#pk-list [data-pk]").forEach((el) => {
+      el.onclick = async () => {
+        try {
+          await PATCH(`/api/tasks/${tid}/parent`, { parent_id: el.dataset.pk });
+          close();
+          await refreshTasks(currentPid());
+          toast("Task nested");
+          if (onDone) onDone();
+        } catch (e) { toast(e.message, true); }
+      };
+    });
+  };
+  $("#pk-search").oninput = draw;
+  draw();
+  setTimeout(() => $("#pk-search").focus(), 60);
+}
+
+/* Prerequisites section inside the task detail modal. */
+function prereqBoxHtml(t) {
+  const kids = taskChildren(t.id);
+  return `<div class="prereq-box">
+    <div style="font-weight:600;margin-bottom:6px">Prerequisites (${kids.length})</div>
+    ${kids.length ? kids.map((k) => `
+      <div class="prereq-row">
+        <span class="${k.status === "done" ? "tt-title done" : ""}">${esc(k.title)} <span class="badge badge-secondary">${esc(colName(k.status))}</span></span>
+        <button class="btn btn-ghost btn-sm" data-unnest="${esc(k.id)}">Remove</button>
+      </div>`).join("") : `<div style="font-size:12px;color:var(--muted-foreground);margin-bottom:6px">No prerequisites yet — this task stands alone.</div>`}
+    <button class="btn btn-outline btn-sm" id="m-nest" style="margin-top:8px">Nest this task under…</button>
+  </div>`;
 }
 
 /* ---------- router ---------- */
@@ -1178,11 +1548,13 @@ async function route() {
   if ((!st.paired || !st.has_space) && h !== "#/setup") { location.hash = "#/setup"; return; }
   const pm = h.match(/^#\/projects\/([^/]+)$/);
   const pw = h.match(/^#\/projects\/([^/]+)\/wiki$/);
+  const ptable = h.match(/^#\/projects\/([^/]+)\/table$/);
   try {
     if (h === "#/setup") await vSetup();
     else if (h === "#/overview") await vOverview();
     else if (h === "#/projects") await vProjects();
     else if (pw) { _pid = pw[1]; await vProjectDetail(pw[1], "wiki"); }
+    else if (ptable) { _pid = ptable[1]; await vProjectDetail(ptable[1], "table"); }
     else if (pm) { _pid = pm[1]; await vProjectDetail(pm[1]); }
     else location.hash = "#/overview";
   } catch (e) {
@@ -1205,4 +1577,11 @@ initTheme();
 route();
 
 // test seam
-globalThis.__test = { taskCard, duePill, fmtDate, COLUMNS, md, vOverview, vProjects, vProjectDetail, vSetup, renderSetup, renderWikiList, renderWikiPane, selectArticle, openModal, projectModal, taskModal, importModal, initTheme, toggleTheme, paintThemeToggle, route, openDrawer, closeDrawer, toggleDrawer, isDrawerOpen, renderBoard, projectRemainingEst, projectEstRaw, estSizeForMins, timeHealthWidget, fetchProjectTasks, Estimate, cuTabOf: () => cuTab, cuState: () => cu, cuInit, cuShowTab, cuShowPane, cuPaneHtml, cuConnect, cuDisconnect, cuLoadTeams, cuOpen, cuCrumb, clickupImportSelected, cuLinkList, cuProjectIdOf: () => cuProjectId, syncNow, syncReportText, fmtSyncTime, emTabOf: () => emTab, emState: () => em, emInit, emShowTab, emShowPane, emPaneHtml, emConnect, emDisconnect, emLoadStarred, emailImportSelected };
+globalThis.__test = { taskCard, duePill, fmtDate, COLUMNS, md, vOverview, vProjects, vProjectDetail, vSetup, renderSetup, renderWikiList, renderWikiPane, selectArticle, openModal, projectModal, taskModal, importModal, initTheme, toggleTheme, paintThemeToggle, route, openDrawer, closeDrawer, toggleDrawer, isDrawerOpen, renderBoard, projectRemainingEst, projectEstRaw, estSizeForMins, timeHealthWidget, fetchProjectTasks, Estimate, cuTabOf: () => cuTab, cuState: () => cu, cuInit, cuShowTab, cuShowPane, cuPaneHtml, cuConnect, cuDisconnect, cuLoadTeams, cuOpen, cuCrumb, clickupImportSelected, cuLinkList, cuProjectIdOf: () => cuProjectId, syncNow, syncReportText, fmtSyncTime, emTabOf: () => emTab, emState: () => em, emInit, emShowTab, emShowPane, emPaneHtml, emConnect, emDisconnect, emLoadStarred, emailImportSelected,
+  renderTable, drawRows, tblRowHtml, buildTaskTree, tblCmp, statusPill, tblDueCell, toggleTblCollapse,
+  tblState: () => ({ sort: tblSort, query: tblQuery, collapsed: tblCollapsed }),
+  tblSet: (s) => { if (s.sort) tblSort = s.sort; if (s.query !== undefined) tblQuery = s.query; if (s.collapsed) tblCollapsed = s.collapsed; },
+  taskChildren, checkPrereqsDone, refreshTasks, nestPicker, openRowMenu, prereqBoxHtml,
+  tblSaveCollapsed, tblLoadCollapsed,
+  setBoardTasks: (t) => { boardTasks = t; }, boardTasksOf: () => boardTasks,
+  setPid: (p) => { _pid = p; } };

@@ -74,6 +74,16 @@ Like the ClickUp token, your mail password lives **only in the server-side `data
 
 Each project has a **Wiki** tab next to its kanban board: a lightweight knowledge base of markdown articles (runbooks, specs, meeting notes) stored as native Anytype pages, so they're searchable and editable in Anytype itself. Articles render headings, lists, code blocks, quotes, links and inline formatting; the editor is plain markdown. You can also import existing Anytype pages into a project's wiki — same rule as tasks: imported pages are unlinked, never deleted.
 
+### Table view + prerequisites
+
+The project page has three tabs — **Board | Table | Wiki**. **Table** (`#/projects/:id/table`) is a colorful, dense spreadsheet built for large task counts: one row per task with a colored status pill per kanban column (gray backlog, blue in progress, amber review, green done), a color-coded due date (red overdue, amber today, muted future), the imported source badge, and a notes snippet. Zebra striping, hover highlight and a sticky header keep long lists readable, and rows render through event delegation so 300+ tasks stay snappy.
+
+Click a column header to sort by title, status or due date; the filter box narrows rows by title or notes. **Inline editing** works cell by cell: click a title to edit it, click the status pill for a dropdown, click a due date for a date picker (Enter saves, Esc cancels).
+
+Tasks can be **nested into each other as prerequisites**: each row's **⋯** menu offers *Nest under…* (a picker of eligible tasks — self, descendants and ancestors are excluded so you can't build a loop) and *Remove from parent*. Parents show a chevron to expand/collapse their prerequisites, with children indented; collapse state is remembered per browser (localStorage), not synced. Kanban cards with children carry a `▸ N` badge, and opening a task's detail dialog lists its prerequisites with one-click removal.
+
+Two safety rules: marking a task **done while its prerequisites are incomplete** asks for confirmation listing the incomplete ones (you can still proceed); **deleting a parent unnests its children** — they're never deleted with it. The parent link lives in `data/links.json` alongside the kanban column, so imported tasks keep their unlinked-never-deleted semantics.
+
 ### Design system
 
 Ascent's UI is a **dependency-free visual port of [shadcn/ui](https://ui.shadcn.com)'s design system** — CSS-variable theming, card anatomy, button variants/sizes, badges, dialogs, tabs, checkbox, progress, separators, skeletons, avatar, table, dropdown menu, and toast — recreated in vanilla CSS with zero dependencies and no build step. This is not a shadcn/React installation: there is no Tailwind, no Radix, no bundler.
@@ -86,7 +96,7 @@ On top of the design system, Ascent wears an **iOS-style skin**:
 
 - **Frosted glass** — the topbar, sidebar, dialogs, dropdowns, and toasts use `backdrop-filter: blur() saturate()` over theme-aware translucent surfaces (Solarized-tinted in both themes), with `-webkit-` prefixes for Safari.
 - **Apple system typography** (`-apple-system, BlinkMacSystemFont, "SF Pro Text" …`), bolder view titles, and softer, larger corner radii.
-- **iOS controls** — native checkboxes render as iOS switches, task checkmarks are iOS Reminders-style circles, and the Board | Wiki tabs are a pill-shaped iOS segmented control.
+- **iOS controls** — native checkboxes render as iOS switches, task checkmarks are iOS Reminders-style circles, and the Board | Table | Wiki tabs are a pill-shaped iOS segmented control.
 - **Tasteful motion** — views fade-and-rise on navigation, dialogs spring in with the iOS easing (`cubic-bezier(0.32, 0.72, 0, 1)`), toasts slide up from the bottom edge, buttons press-scale, and project/task cards lift on hover. Everything is instant under `prefers-reduced-motion`.
 - **Responsive drawer** — at **≤900px** the sidebar collapses into an off-canvas drawer: opened by the ☰ button in the topbar, it slides in with the iOS spring, and closes via the blurred scrim, the ✕ button, `Esc`, or any navigation (focus moves into the drawer for keyboard users). On small screens the kanban becomes a horizontally scrollable snap list, the topbar condenses (truncated title, hidden subtitle), and dashboards go single-column.
 
@@ -124,6 +134,7 @@ GET    /api/projects/:id/tasks
 POST   /api/projects/:id/tasks        {title, notes, due_date, status} → Anytype task
 POST   /api/projects/:id/tasks/import {object_ids}
 PATCH/DELETE /api/tasks/:id  {title?, done?, due_date?, notes?, status?}
+PATCH /api/tasks/:id/parent  {parent_id | null} → nest as a prerequisite (400 on cycles or cross-project parents)
 GET    /api/projects/:id/wiki     wiki articles for a project
 POST   /api/projects/:id/wiki     {title, body} → Anytype page
 POST   /api/projects/:id/wiki/import {object_ids}

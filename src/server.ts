@@ -30,7 +30,7 @@ interface Config {
   space_name: string;
   task_keys: TaskKeys;
 }
-interface TaskLink { project_id: string; status: string; source: "ascent" | "imported" }
+interface TaskLink { project_id: string; status: string; source: "ascent" | "imported"; parent_id?: string }
 interface ProjectLink { id: string; source: "ascent" | "imported"; added_at: string }
 interface WikiLink { project_id: string; source: "ascent" | "imported"; added_at: string }
 // ClickUp integration state: the Personal API token (server-side only), the
@@ -168,8 +168,46 @@ async function tasksFor(projectId: string): Promise<any[]> {
     }
   }
   if (pruned) saveLinks();
+  // Sanitize parent links: a parent that was pruned (deleted in Anytype) or
+  // lives in another project unnests its children rather than orphaning them.
+  const live = new Set(
+    Object.entries(links.tasks).filter(([, l]) => l.project_id === projectId).map(([id]) => id),
+  );
+  let unnests = false;
+  for (const [id, l] of Object.entries(links.tasks)) {
+    if (l.project_id === projectId && l.parent_id && !live.has(l.parent_id)) {
+      links.tasks[id] = { ...l, parent_id: undefined };
+      unnests = true;
+    }
+  }
+  if (unnests) saveLinks();
+  const childCount: Record<string, number> = {};
+  for (const l of Object.values(links.tasks)) {
+    if (l.project_id === projectId && l.parent_id && live.has(l.parent_id)) {
+      childCount[l.parent_id] = (childCount[l.parent_id] || 0) + 1;
+    }
+  }
+  for (const t of out) {
+    const l = links.tasks[t.id];
+    t.parent_id = l && l.parent_id ? l.parent_id : null;
+    t.child_count = childCount[t.id] || 0;
+  }
   out.sort((a, b) => (a.dueMs || Infinity) - (b.dueMs || Infinity) || b.updatedMs - a.updatedMs);
   return out;
+}
+
+// True when nesting `tid` under `newParentId` would create a parent cycle
+// (self-parent or ancestor-parent). Caller has already checked that both ids
+// are tracked and in the same project.
+function wouldCycle(tid: string, newParentId: string): boolean {
+  const seen = new Set<string>([tid]);
+  let cur: string | undefined = newParentId;
+  while (cur) {
+    if (seen.has(cur)) return true;
+    seen.add(cur);
+    cur = links.tasks[cur]?.parent_id;
+  }
+  return false;
 }
 
 async function wikiFor(projectId: string): Promise<any[]> {
@@ -517,9 +555,34 @@ const server = Bun.serve({
             try { await deleteObject(config.space_id, tid); } catch { /* already gone */ }
           }
           delete links.tasks[tid];
+          // Deleting a parent unnests (never deletes) its children.
+          for (const [cid, l] of Object.entries(links.tasks)) {
+            if (l.parent_id === tid) links.tasks[cid] = { ...l, parent_id: undefined };
+          }
           saveLinks();
           return json({ ok: true });
         }
+      }
+      // ---------- prerequisites: nest a task under another task ----------
+      const parentMatch = path.match(/^\/api\/tasks\/([^/]+)\/parent$/);
+      if (parentMatch && method === "PATCH") {
+        const gate = needSpace();
+        if (gate) return gate;
+        const tid = parentMatch[1];
+        const link = links.tasks[tid];
+        if (!link) return json({ error: "task not tracked" }, 404);
+        const b = await readBody(req);
+        const np = b.parent_id ? String(b.parent_id) : null;
+        if (np) {
+          const plink = links.tasks[np];
+          if (!plink) return json({ error: "parent task not tracked" }, 404);
+          if (plink.project_id !== link.project_id)
+            return json({ error: "a task can only nest under a task in the same project" }, 400);
+          if (wouldCycle(tid, np)) return json({ error: "nesting here would create a cycle" }, 400);
+        }
+        links.tasks[tid] = { ...link, parent_id: np || undefined };
+        saveLinks();
+        return json({ ok: true, parent_id: np });
       }
 
       // ---------- wiki ----------

@@ -604,3 +604,62 @@ body.drawer-open .scrim { opacity: 1; visibility: visible; transition: opacity 0
 /* ClickUp sync affordance in the project topbar */
 .sync-wrap { display: inline-flex; align-items: center; gap: 8px; }
 .sync-sub { font-size: 12px; color: var(--muted-foreground); white-space: nowrap; }
+
+/* ---------- Table view: colorful spreadsheet + prerequisites ---------- */
+.tt-toolbar { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; }
+.tt-search { flex: 1; max-width: 420px; }
+.tt-count { font-size: 12px; color: var(--muted-foreground); white-space: nowrap; }
+.tt-wrap { overflow: auto; max-height: calc(100vh - 340px); padding: 0; }
+table.ttable { width: 100%; border-collapse: collapse; font-size: 13px; }
+.ttable thead th {
+  position: sticky; top: 0; z-index: 2;
+  background: var(--card);
+  text-align: left; padding: 9px 10px; white-space: nowrap;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted-foreground); font-weight: 600; font-size: 12px;
+  text-transform: uppercase; letter-spacing: 0.04em;
+  user-select: none;
+}
+.ttable thead th[data-sort] { cursor: pointer; }
+.ttable thead th[data-sort]:hover { color: var(--foreground); }
+.ttable thead th.sorted { color: var(--foreground); }
+.ttable tbody td { padding: 7px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.ttable tbody tr:nth-child(even) { background: color-mix(in srgb, var(--muted) 45%, transparent); }
+.ttable tbody tr:hover { background: color-mix(in srgb, var(--muted) 75%, transparent); }
+.tt-chev { background: none; border: none; cursor: pointer; color: var(--muted-foreground); padding: 0 4px 0 0; font-size: 12px; }
+.tt-chev:hover { color: var(--foreground); }
+.tt-chev-sp { display: inline-block; width: 18px; }
+.tt-title { font-weight: 500; }
+.tt-title.done { text-decoration: line-through; color: var(--muted-foreground); }
+td[data-act="title"]:hover .tt-title { text-decoration: underline; cursor: text; }
+.st-pill { border: none; border-radius: 999px; padding: 2px 10px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+td[data-act="status"] { cursor: pointer; }
+.st-backlog { background: color-mix(in srgb, var(--muted-foreground) 16%, transparent); color: var(--muted-foreground); }
+.st-in_progress { background: color-mix(in srgb, var(--sol-blue) 16%, transparent); color: var(--sol-blue); }
+.st-review { background: color-mix(in srgb, var(--sol-orange) 18%, transparent); color: var(--sol-orange); }
+.st-done { background: color-mix(in srgb, var(--sol-green) 18%, transparent); color: var(--sol-green); }
+td[data-act="due"] { cursor: pointer; white-space: nowrap; }
+.tt-due-overdue { color: var(--sol-red); font-weight: 700; }
+.tt-due-today { color: var(--sol-orange); font-weight: 700; }
+.tt-due-future { color: var(--muted-foreground); }
+.tt-due-done { color: var(--muted-foreground); }
+.tt-due-empty { color: var(--muted-foreground); opacity: 0.5; }
+.tt-notes { color: var(--muted-foreground); max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tt-kids { margin-left: 6px; }
+.tt-menu-cell { position: relative; }
+.tt-menu-btn { width: 1.75rem; height: 1.75rem; }
+.tt-menu {
+  position: absolute; right: 0; top: calc(100% + 2px); z-index: 50;
+  background: var(--popover); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: var(--shadow-md); min-width: 170px; padding: 4px;
+}
+.tt-menu button {
+  display: block; width: 100%; text-align: left; background: none; border: none;
+  padding: 8px 10px; border-radius: 6px; cursor: pointer;
+  color: var(--foreground); font-size: 13px;
+}
+.tt-menu button:hover { background: var(--muted); }
+.tt-edit { width: 100%; font-size: 13px; padding: 4px 6px; }
+/* prerequisites box in the task detail modal */
+.prereq-box { margin-top: 14px; border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+.prereq-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 0; }
