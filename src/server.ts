@@ -307,18 +307,22 @@ const server = Bun.serve({
         const attention: any[] = [];
         const now = Date.now();
         const dayMs = 86400000;
+        // Overdue means the due DAY is past, not the instant: a task due
+        // today is not overdue. Compare against local start-of-day since
+        // dueMs is a local-midnight calendar day.
+        const todayStart = (() => { const s = new Date(); s.setHours(0, 0, 0, 0); return s.getTime(); })();
         for (const pl of links.projects) {
           const p = await hydrateProject(pl);
           if (!p) continue;
           const tasks = await tasksFor(pl.id);
           const done = tasks.filter((t) => t.status === "done").length;
-          const od = tasks.filter((t) => t.status !== "done" && t.dueMs && t.dueMs < now).length;
+          const od = tasks.filter((t) => t.status !== "done" && t.dueMs && t.dueMs < todayStart).length;
           open += tasks.length - done;
           doneCount += done;
           overdue += od;
           for (const t of tasks) {
             if (t.status !== "done" && t.dueMs && t.dueMs < now + 3 * dayMs) {
-              attention.push({ project_id: pl.id, project_name: p.name, id: t.id, title: t.title, dueMs: t.dueMs, overdue: t.dueMs < now });
+              attention.push({ project_id: pl.id, project_name: p.name, id: t.id, title: t.title, dueMs: t.dueMs, overdue: t.dueMs < todayStart });
             }
           }
           projects.push({ ...p, total: tasks.length, done, progress: tasks.length ? Math.round((done / tasks.length) * 100) : 0, overdue: od });

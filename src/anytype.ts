@@ -145,6 +145,18 @@ export function asMs(v: any): number {
       const n = Number(t);
       return n > 1e12 ? n : n * 1000;
     }
+    // Date-only strings are calendar days, not instants: parse as LOCAL
+    // midnight so the day a user picked is the day that renders back, in
+    // every timezone. (Date.parse treats them as UTC midnight, which shifts
+    // the day for anyone west of UTC — the task modal's calendar would show
+    // the previous day after saving.)
+    const m = t.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (m) {
+      const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+      return d.getFullYear() === Number(m[1]) && d.getMonth() === Number(m[2]) - 1 && d.getDate() === Number(m[3])
+        ? d.getTime()
+        : 0;
+    }
     const ms = Date.parse(t);
     return Number.isNaN(ms) ? 0 : ms;
   }

@@ -34,6 +34,8 @@ ANYTYPE_API_KEY=... bun src/server.ts   # key from Anytype → Settings → API 
 | Project ↔ article link | `data/links.json` (local index only) |
 | Kanban column | `data/links.json` (`backlog` / `in_progress` / `review` / `done`) |
 
+Due dates are calendar days, not instants: the day you pick in the task modal is the day that renders back, in every timezone (date-only values are parsed as local midnight, and "overdue" means the due day has passed).
+
 All *content* lives in your Anytype space. The local `data/` directory (gitignored) holds only the API key, the chosen space, and the link index — which project each task belongs to and which board column it's in. Checking a task done in Ascent checks it done in Anytype, and vice versa.
 
 Task property keys (`done`, `due_date`) are **discovered at setup** via `GET /v1/spaces/{id}/properties` — nothing is hardcoded, so it adapts to your space.
@@ -105,7 +107,7 @@ POST   /api/pair/challenge    start 4-digit-code pairing
 POST   /api/pair/complete     {challenge_id, code} → stores API key
 GET    /api/spaces            list Anytype spaces
 GET/POST /api/config          chosen space
-GET    /api/overview          KPIs + project health + overdue/due-soon
+GET    /api/overview          KPIs + project health + overdue/due-soon (a task is overdue only once its due *day* has passed — due-today is never overdue)
 GET    /api/projects          projects with progress
 POST   /api/projects          {name, description, icon} → Anytype page
 POST   /api/projects/import   {object_id} link an existing page
