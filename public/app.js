@@ -882,10 +882,18 @@ async function vProjectDetail(id, tab = "board") {
   const done = d.tasks.filter((t) => t.status === "done").length;
   setTitle(p.name, `${done}/${d.tasks.length} tasks · ${wikiArticles.length} wiki article${wikiArticles.length === 1 ? "" : "s"}`);
   const binding = d.clickup_binding;
+  let emSyncBtn = "";
+  try {
+    const es = await GET("/api/integrations/email/status");
+    if (es.connected && es.project_id === id) {
+      emSyncBtn = `<button class="btn btn-outline btn-sm" id="pd-email-sync" title="Import newly starred emails from ${esc(es.account)}">⇅ Sync email</button>`;
+    }
+  } catch (e) {}
   setActions(tab === "wiki"
     ? `<button class="btn btn-outline btn-sm" id="pd-import-wiki">⇪ Import pages</button> <button class="btn btn-default btn-sm" id="pd-new-article">+ New article</button>`
     : `
     ${binding ? `<span class="sync-wrap"><button class="btn btn-outline btn-sm" id="pd-sync" title="Sync with ClickUp list “${esc(binding.list_name)}”">⇄ Sync</button><span class="sync-sub" id="pd-sync-sub">${binding.last_sync ? "Last synced " + esc(fmtSyncTime(binding.last_sync)) : "Not synced yet"}</span></span>` : ""}
+    ${emSyncBtn}
     <button class="btn btn-outline btn-sm" id="pd-import">⇪ Import tasks</button>
     <button class="btn btn-ghost btn-icon" id="pd-edit" title="Edit project">✎</button>
     <button class="btn btn-default btn-sm" id="pd-new-task">+ New task</button>`);
@@ -943,6 +951,21 @@ async function vProjectDetail(id, tab = "board") {
   $("#pd-import").onclick = () => importModal("task", id);
   const syncBtn = $("#pd-sync");
   if (syncBtn) syncBtn.onclick = () => syncNow(id);
+  const emSyncBtnEl = $("#pd-email-sync");
+  if (emSyncBtnEl) emSyncBtnEl.onclick = async () => {
+    emSyncBtnEl.disabled = true;
+    const orig = emSyncBtnEl.textContent;
+    emSyncBtnEl.textContent = "Syncing…";
+    try {
+      const r = await POST("/api/integrations/email/sync", {});
+      await refreshTasks(id);
+      toast(r.up_to_date
+        ? "Already up to date — no new starred emails"
+        : `Imported ${r.imported} new starred email${r.imported === 1 ? "" : "s"}`);
+    } catch (e) { toast(e.message, true); }
+    emSyncBtnEl.disabled = false;
+    emSyncBtnEl.textContent = orig;
+  };
 }
 
 /* ---------- wiki ---------- */

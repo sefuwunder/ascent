@@ -1045,6 +1045,51 @@ const server = Bun.serve({
       const emailLabel = (): string =>
         links.email.user.includes("@") ? links.email.user : `${links.email.user}@${links.email.host}`;
 
+      // Import the given starred-mail uids as tasks into the email-account
+      // project (created on first use). Shared by the manual import picker
+      // and the one-click sync endpoint. `mails` is the current starred
+      // list; when omitted it is fetched once here.
+      async function importEmailUids(uids: string[], mails?: Awaited<ReturnType<typeof fetchStarred>>) {
+        let pid = links.email.project_id;
+        if (!pid || !links.projects.some((p) => p.id === pid)) {
+          const o = await createObject(config.space_id, {
+            name: `✉ ${emailLabel()}`,
+            type_key: "page",
+            body: `Starred emails imported from ${emailLabel()} over IMAP.`,
+            icon: "✉",
+          });
+          pid = String(o.id);
+          links.projects.unshift({ id: pid, source: "imported", added_at: new Date().toISOString() });
+          links.email.project_id = pid;
+          saveLinks();
+        }
+        const list = mails ?? await fetchStarred(links.email);
+        const byUid = new Map(list.map((m) => [m.uid, m]));
+        let imported = 0;
+        let skipped = 0;
+        for (const uid of uids) {
+          if (links.email.uids[uid]) { skipped++; continue; } // already imported
+          const m = byUid.get(uid);
+          if (!m) { skipped++; continue; } // no longer starred / gone
+          const notes = [
+            `From: ${m.from || "unknown"}`,
+            m.date ? `Date: ${m.date}` : "",
+            "",
+            m.snippet || "",
+          ].join("\n").trim();
+          const task = await createLinkedTask(pid, {
+            title: m.subject || "(no subject)",
+            notes,
+            due_date: "",
+            status: "backlog",
+          }, "imported");
+          links.email.uids[uid] = task.id;
+          imported++;
+        }
+        saveLinks();
+        return { imported, skipped, project_id: pid };
+      }
+
       if (path === "/api/integrations/email/status" && method === "GET") {
         return json({
           connected: !!links.email.host,
@@ -1095,45 +1140,25 @@ const server = Bun.serve({
         const b = await readBody(req);
         const uids: string[] = Array.isArray(b.uids) ? b.uids.map((u: any) => String(u)) : [];
         if (!uids.length) return json({ error: "pick at least one email" }, 400);
-        // The email account is the project: create it once, reuse it after.
-        let pid = links.email.project_id;
-        if (!pid || !links.projects.some((p) => p.id === pid)) {
-          const o = await createObject(config.space_id, {
-            name: `✉ ${emailLabel()}`,
-            type_key: "page",
-            body: `Starred emails imported from ${emailLabel()} over IMAP.`,
-            icon: "✉",
-          });
-          pid = String(o.id);
-          links.projects.unshift({ id: pid, source: "imported", added_at: new Date().toISOString() });
-          links.email.project_id = pid;
-          saveLinks();
-        }
+        // The email account is the project: created once, reused after.
+        const r = await importEmailUids(uids);
+        return json({ ok: true, ...r }, 201);
+      }
+      if (path === "/api/integrations/email/sync" && method === "POST") {
+        // One-click sync for the email-account project: import every starred
+        // mail that hasn't been imported yet (dedupe by mailbox UID, so a
+        // sync never duplicates tasks).
+        const gate = needSpace();
+        if (gate) return gate;
+        const g = needEmail();
+        if (g) return g;
         const mails = await fetchStarred(links.email);
-        const byUid = new Map(mails.map((m) => [m.uid, m]));
-        let imported = 0;
-        let skipped = 0;
-        for (const uid of uids) {
-          if (links.email.uids[uid]) { skipped++; continue; } // already imported
-          const m = byUid.get(uid);
-          if (!m) { skipped++; continue; } // no longer starred / gone
-          const notes = [
-            `From: ${m.from || "unknown"}`,
-            m.date ? `Date: ${m.date}` : "",
-            "",
-            m.snippet || "",
-          ].join("\n").trim();
-          const task = await createLinkedTask(pid, {
-            title: m.subject || "(no subject)",
-            notes,
-            due_date: "",
-            status: "backlog",
-          }, "imported");
-          links.email.uids[uid] = task.id;
-          imported++;
+        const fresh = mails.map((m) => m.uid).filter((uid) => !links.email.uids[uid]);
+        if (!fresh.length) {
+          return json({ ok: true, imported: 0, skipped: mails.length, project_id: links.email.project_id || null, up_to_date: true });
         }
-        saveLinks();
-        return json({ ok: true, imported, skipped, project_id: pid }, 201);
+        const r = await importEmailUids(fresh, mails);
+        return json({ ok: true, ...r }, 201);
       }
 
       // ---------- search (for import pickers) ----------

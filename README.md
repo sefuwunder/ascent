@@ -66,7 +66,7 @@ The token lives only in the server-side `data/links.json` (gitignored, never com
 
 Turn your inbox into a project. The task-import dialog has a third **Email** tab next to Anytype and ClickUp: connect a mail account over **IMAP** (host, port — 993 by default, username, password) and Ascent lists your **starred (⭐) emails**, newest first, with a short text snippet under each subject.
 
-Pick the ones you want and hit **Import selected**: the task title is the email subject, the notes carry the sender, date and snippet, and tasks land in a project **named after the mail account** (e.g. `✉ you@example.com`) — the account *is* the project, created once as a native Anytype page and reused for later imports. Re-importing skips emails already imported (the UID dedupe map survives disconnects, so you can never double-import), and a **↻ Refresh** button re-reads the starred list.
+Pick the ones you want and hit **Import selected**: the task title is the email subject, the notes carry the sender, date and snippet, and tasks land in a project **named after the mail account** (e.g. `✉ you@example.com`) — the account *is* the project, created once as a native Anytype page and reused for later imports. Re-importing skips emails already imported (the UID dedupe map survives disconnects, so you can never double-import), and a **↻ Refresh** button re-reads the starred list. Once the ✉ project exists, its page also shows a **⇅ Sync email** button in the top bar — one click imports every newly starred email since the last sync (same UID dedupe, so no duplicates), or tells you you're already up to date.
 
 Like the ClickUp token, your mail password lives **only in the server-side `data/links.json`** (gitignored, never committed) and is proxied through the server — `GET /api/integrations/email/status` returns only an account label, never the password. **Disconnecting** clears the password but keeps the project, the tasks, and the dedupe map; deleting the ✉ project from Ascent forgets the binding, so the next import recreates it. IMAP is implemented with a tiny zero-dependency client over TLS sockets (`src/imap.ts`) — implicit TLS only, no app permissions or OAuth setup on most providers (for Gmail you need an [app password](https://support.google.com/accounts/answer/185833)).
 
@@ -159,6 +159,7 @@ POST   /api/integrations/email/connect     {host, port?, user, pass} → validat
 POST   /api/integrations/email/disconnect  clears the credentials (project, tasks and dedupe map are kept)
 GET    /api/integrations/email/starred     starred (\\Flagged) emails: {uid, from, subject, date, snippet, imported}
 POST   /api/integrations/email/import      {uids} → native Anytype tasks in the ✉ account project, deduped by UID
+POST   /api/integrations/email/sync       import all newly starred emails (not yet in the UID map) into the ✉ project
 ```
 
 ## Troubleshooting
