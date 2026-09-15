@@ -62,6 +62,14 @@ The token is **never returned to the browser** — `GET /api/integrations/clicku
 
 The token lives only in the server-side `data/links.json` (gitignored, never committed). A `clickup_id → anytype_id` map in the same file **dedupes** imports: re-importing the same task skips it ("N imported, M already imported — skipped"), and the map survives disconnecting and reconnecting, so you can never double-import by accident.
 
+### Starred emails → tasks (IMAP)
+
+Turn your inbox into a project. The task-import dialog has a third **Email** tab next to Anytype and ClickUp: connect a mail account over **IMAP** (host, port — 993 by default, username, password) and Ascent lists your **starred (⭐) emails**, newest first, with a short text snippet under each subject.
+
+Pick the ones you want and hit **Import selected**: the task title is the email subject, the notes carry the sender, date and snippet, and tasks land in a project **named after the mail account** (e.g. `✉ you@example.com`) — the account *is* the project, created once as a native Anytype page and reused for later imports. Re-importing skips emails already imported (the UID dedupe map survives disconnects, so you can never double-import), and a **↻ Refresh** button re-reads the starred list.
+
+Like the ClickUp token, your mail password lives **only in the server-side `data/links.json`** (gitignored, never committed) and is proxied through the server — `GET /api/integrations/email/status` returns only an account label, never the password. **Disconnecting** clears the password but keeps the project, the tasks, and the dedupe map; deleting the ✉ project from Ascent forgets the binding, so the next import recreates it. IMAP is implemented with a tiny zero-dependency client over TLS sockets (`src/imap.ts`) — implicit TLS only, no app permissions or OAuth setup on most providers (for Gmail you need an [app password](https://support.google.com/accounts/answer/185833)).
+
 ### Project wiki
 
 Each project has a **Wiki** tab next to its kanban board: a lightweight knowledge base of markdown articles (runbooks, specs, meeting notes) stored as native Anytype pages, so they're searchable and editable in Anytype itself. Articles render headings, lists, code blocks, quotes, links and inline formatting; the editor is plain markdown. You can also import existing Anytype pages into a project's wiki — same rule as tasks: imported pages are unlinked, never deleted.
@@ -135,6 +143,11 @@ POST   /api/integrations/clickup/lists/:id/bind  {project_id} → bind a list wi
 GET    /api/integrations/clickup/bindings        sanitized bindings (no token)
 DELETE /api/integrations/clickup/bindings/:project_id
 POST   /api/integrations/clickup/sync            {project_id} → manual two-way sync; returns {pulled, pushed, imported_new, pushed_new, conflicts, skipped, gone_clickup, gone_anytime}
+GET    /api/integrations/email/status      {connected, account, project_id} — the password is never returned
+POST   /api/integrations/email/connect     {host, port?, user, pass} → validated with an IMAP login, stored server-side
+POST   /api/integrations/email/disconnect  clears the credentials (project, tasks and dedupe map are kept)
+GET    /api/integrations/email/starred     starred (\\Flagged) emails: {uid, from, subject, date, snippet, imported}
+POST   /api/integrations/email/import      {uids} → native Anytype tasks in the ✉ account project, deduped by UID
 ```
 
 ## Troubleshooting

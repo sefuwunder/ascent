@@ -430,15 +430,24 @@ function importModal(kind, projectId) {
       ? `<div class="tabs-list" role="tablist" style="margin-bottom:12px">
            <button class="tabs-trigger on" id="imp-tab-any">Anytype</button>
            <button class="tabs-trigger" id="imp-tab-cu">ClickUp</button>
+           <button class="tabs-trigger" id="imp-tab-em">Email</button>
          </div>
          <div id="imp-any">${anyPane}</div>
-         <div id="imp-cu" style="display:none"></div>`
+         <div id="imp-cu" style="display:none"></div>
+         <div id="imp-em" style="display:none"></div>`
       : anyPane,
     async (_d, close) => {
       if (isTask && cuTab === "cu") {
         const { imported, skipped } = await clickupImportSelected(projectId);
         close();
         toast(`Imported ${imported}${skipped ? `, ${skipped} already imported — skipped` : ""}`);
+        route();
+        return;
+      }
+      if (isTask && emTab === "em") {
+        const { imported, skipped } = await emailImportSelected();
+        close();
+        toast(`Imported ${imported}${skipped ? `, ${skipped} already imported — skipped` : ""} — find them in the ✉ project`);
         route();
         return;
       }
@@ -466,8 +475,10 @@ function importModal(kind, projectId) {
   run();
   if (isTask) {
     cuTab = "any";
-    $("#imp-tab-any").onclick = () => cuShowTab("any");
+    emTab = "any";
+    $("#imp-tab-any").onclick = () => { cuShowTab("any"); emShowTab("any"); };
     $("#imp-tab-cu").onclick = () => cuShowTab("cu");
+    $("#imp-tab-em").onclick = () => emShowTab("em");
   }
 }
 
@@ -487,12 +498,15 @@ function cuInit() {
 }
 function cuShowTab(which) {
   cuTab = which;
-  const any = $("#imp-tab-any"), ctab = $("#imp-tab-cu");
+  if (which === "cu") emTab = "any";
+  const any = $("#imp-tab-any"), ctab = $("#imp-tab-cu"), etab = $("#imp-tab-em");
   if (any && any.classList) any.classList.toggle("on", which === "any");
   if (ctab && ctab.classList) ctab.classList.toggle("on", which === "cu");
-  const ap = $("#imp-any"), cp = $("#imp-cu");
+  if (etab && etab.classList) etab.classList.toggle("on", false);
+  const ap = $("#imp-any"), cp = $("#imp-cu"), ep = $("#imp-em");
   if (ap && ap.style) ap.style.display = which === "any" ? "" : "none";
   if (cp && cp.style) cp.style.display = which === "cu" ? "" : "none";
+  if (ep && ep.style) ep.style.display = "none";
   if (which === "cu") cuShowPane();
 }
 async function cuShowPane() {
@@ -649,6 +663,125 @@ async function clickupImportSelected(projectId) {
   const tasks = cu.tasks.filter((t) => checked.includes(String(t.id)));
   return POST(`/api/integrations/clickup/lists/${encodeURIComponent(listCrumb.id)}/import`,
     { project_id: projectId, tasks });
+}
+
+/* ---------- Email integration: starred IMAP emails → tasks ----------
+   Credentials are pasted by the user and POSTed to the server, which stores
+   them in gitignored data/links.json and proxies every IMAP call. The
+   browser never sees the password again: status returns only an account
+   label. The mail account IS the project: the first import creates a
+   native Anytype project named after the account (✉ user@host) and later
+   imports reuse it. Re-imports skip UIDs already imported (dedupe survives
+   disconnects). */
+let emTab = "any";
+let em = null;
+function emInit() {
+  em = { connected: false, account: "", mails: [], loaded: false, loading: false, error: "" };
+}
+function emShowTab(which) {
+  emTab = which;
+  if (which === "em") cuTab = "any";
+  const any = $("#imp-tab-any"), ctab = $("#imp-tab-cu"), etab = $("#imp-tab-em");
+  if (any && any.classList) any.classList.toggle("on", which === "any");
+  if (ctab && ctab.classList) ctab.classList.toggle("on", false);
+  if (etab && etab.classList) etab.classList.toggle("on", which === "em");
+  const ap = $("#imp-any"), cp = $("#imp-cu"), ep = $("#imp-em");
+  if (ap && ap.style) ap.style.display = which === "any" ? "" : "none";
+  if (cp && cp.style) cp.style.display = "none";
+  if (ep && ep.style) ep.style.display = which === "em" ? "" : "none";
+  if (which === "em") emShowPane();
+}
+async function emShowPane() {
+  const box = $("#imp-em");
+  if (!box) return;
+  if (!em) emInit();
+  try {
+    const s = await GET("/api/integrations/email/status");
+    em.connected = !!s.connected;
+    em.account = s.account || "";
+  } catch { em.connected = false; }
+  emRender();
+  if (em.connected && !em.loaded) await emLoadStarred();
+}
+function emRender() {
+  const box = $("#imp-em");
+  if (!box) return;
+  box.innerHTML = emPaneHtml();
+  emWirePane();
+}
+function emPaneHtml() {
+  if (!em.connected) return `
+    <p style="font-size:12px;color:var(--muted-foreground);margin:0 0 10px">Connect a mail account over <strong>IMAP</strong> — starred (⭐) emails become tasks in a project named after the account. Most providers use port <strong>993</strong> with your login email as the username. The password is stored on this server only and never sent back to your browser.</p>
+    <div class="search-row" style="margin-bottom:8px"><input id="em-host" placeholder="Mail host — imap.gmail.com" autocomplete="off" style="flex:1"><input id="em-port" placeholder="993" inputmode="numeric" style="width:76px"></div>
+    <div class="search-row" style="margin-bottom:8px"><input id="em-user" placeholder="Username — you@example.com" autocomplete="off" style="flex:1"></div>
+    <div class="search-row"><input id="em-pass" type="password" placeholder="Password (or app password)" autocomplete="off" style="flex:1"><button class="btn btn-default" id="em-connect">Connect</button></div>
+    <div id="em-msg" style="margin-top:8px;min-height:1.4em"></div>`;
+  let list;
+  if (em.loading) list = `<div class="empty" style="padding:16px">Loading starred emails…</div>`;
+  else if (em.error) list = `<div class="empty" style="padding:16px">⚠ ${esc(em.error)}</div>`;
+  else if (em.mails.length) {
+    const fresh = em.mails.filter((m) => !m.imported).length;
+    list = (fresh ? `<label class="import-row" style="font-weight:600"><input type="checkbox" id="em-all"><span>Select all (${fresh} new)</span></label>` : "") +
+      em.mails.map((m) => `
+        <label class="import-row"><input type="checkbox" class="em-mail" value="${esc(m.uid)}"${m.imported ? " disabled" : ""}>
+          <span>⭐ <strong>${esc(m.subject)}</strong>${m.imported ? ` <span class="badge badge-secondary">imported</span>` : ""}
+          <br><span style="color:var(--muted-foreground);font-size:12px">${esc(m.from)}${m.date ? ` · ${esc(m.date)}` : ""}</span>
+          ${m.snippet ? `<br><span style="font-size:12px">${esc(m.snippet)}</span>` : ""}</span></label>`).join("");
+  } else list = `<div class="empty" style="padding:16px">No starred emails found in this account.</div>`;
+  return `
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+      <div style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">✉ <strong>${esc(em.account)}</strong></div>
+      <button class="btn btn-link btn-sm" id="em-refresh">↻ Refresh</button>
+      <button class="btn btn-link btn-sm" id="em-disconnect" style="color:var(--destructive);flex-shrink:0">Disconnect</button>
+    </div>
+    <div id="em-items" style="max-height:300px;overflow:auto">${list}</div>
+    <p style="font-size:12px;color:var(--muted-foreground);margin:10px 0 0">Starred emails become tasks in a project named after this account. Re-importing skips emails already imported.</p>`;
+}
+function emWirePane() {
+  const conn = $("#em-connect");
+  if (conn) conn.onclick = emConnect;
+  const pw = $("#em-pass");
+  if (pw && pw.addEventListener) pw.addEventListener("keydown", (e) => { if (e.key === "Enter") emConnect(); });
+  const dis = $("#em-disconnect");
+  if (dis) dis.onclick = emDisconnect;
+  const ref = $("#em-refresh");
+  if (ref) ref.onclick = () => { em.loaded = false; emLoadStarred(); };
+  const all = $("#em-all");
+  if (all) all.onclick = () => { $$("#imp-em .em-mail:not([disabled])").forEach((c) => { c.checked = all.checked; }); };
+}
+async function emConnect() {
+  const host = $("#em-host").value.trim();
+  const user = $("#em-user").value.trim();
+  const pass = $("#em-pass").value;
+  const port = $("#em-port").value.trim();
+  const msg = $("#em-msg");
+  const say = (html) => { if (msg) msg.innerHTML = html; };
+  if (!host || !user || !pass) { say(`<span class="badge badge-destructive">Fill in host, username and password</span>`); return; }
+  say(`<span style="font-size:12px;color:var(--muted-foreground)">Connecting…</span>`);
+  try { await POST("/api/integrations/email/connect", { host, port, user, pass }); }
+  catch (e) { say(`<span class="badge badge-destructive">${esc(e.message)}</span>`); return; }
+  emInit();
+  await emShowPane(); // re-renders as connected, then loads starred
+}
+async function emDisconnect() {
+  await POST("/api/integrations/email/disconnect").catch(() => {});
+  emInit();
+  emRender();
+}
+async function emLoadStarred() {
+  em.loading = true; em.error = ""; em.loaded = false; emRender();
+  try {
+    const { mails, account } = await GET("/api/integrations/email/starred");
+    em.mails = mails || [];
+    if (account) em.account = account;
+    em.loaded = true;
+  } catch (e) { em.error = e.message; }
+  em.loading = false; emRender();
+}
+async function emailImportSelected() {
+  const checked = $$("#imp-em .em-mail:checked").map((c) => c.value);
+  if (!checked.length) throw new Error("Select at least one email");
+  return POST("/api/integrations/email/import", { uids: checked });
 }
 
 /** Compact, human-readable summary of a sync report for the toast. */
@@ -1072,4 +1205,4 @@ initTheme();
 route();
 
 // test seam
-globalThis.__test = { taskCard, duePill, fmtDate, COLUMNS, md, vOverview, vProjects, vProjectDetail, vSetup, renderSetup, renderWikiList, renderWikiPane, selectArticle, openModal, projectModal, taskModal, importModal, initTheme, toggleTheme, paintThemeToggle, route, openDrawer, closeDrawer, toggleDrawer, isDrawerOpen, renderBoard, projectRemainingEst, projectEstRaw, estSizeForMins, timeHealthWidget, fetchProjectTasks, Estimate, cuTabOf: () => cuTab, cuState: () => cu, cuInit, cuShowTab, cuShowPane, cuPaneHtml, cuConnect, cuDisconnect, cuLoadTeams, cuOpen, cuCrumb, clickupImportSelected, cuLinkList, cuProjectIdOf: () => cuProjectId, syncNow, syncReportText, fmtSyncTime };
+globalThis.__test = { taskCard, duePill, fmtDate, COLUMNS, md, vOverview, vProjects, vProjectDetail, vSetup, renderSetup, renderWikiList, renderWikiPane, selectArticle, openModal, projectModal, taskModal, importModal, initTheme, toggleTheme, paintThemeToggle, route, openDrawer, closeDrawer, toggleDrawer, isDrawerOpen, renderBoard, projectRemainingEst, projectEstRaw, estSizeForMins, timeHealthWidget, fetchProjectTasks, Estimate, cuTabOf: () => cuTab, cuState: () => cu, cuInit, cuShowTab, cuShowPane, cuPaneHtml, cuConnect, cuDisconnect, cuLoadTeams, cuOpen, cuCrumb, clickupImportSelected, cuLinkList, cuProjectIdOf: () => cuProjectId, syncNow, syncReportText, fmtSyncTime, emTabOf: () => emTab, emState: () => em, emInit, emShowTab, emShowPane, emPaneHtml, emConnect, emDisconnect, emLoadStarred, emailImportSelected };

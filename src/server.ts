@@ -15,6 +15,9 @@ import {
   updateCuTask, createCuTask, taskToDraft, planImport,
   cuStatusToColumn, columnToCuStatus, type CuTask, type CuStatus,
 } from "./clickup";
+import {
+  ImapError, validateImap, fetchStarred,
+} from "./imap";
 
 const PORT = Number(process.env.PORT || 3004);
 const DATA = new URL("../data/", import.meta.url).pathname;
@@ -49,7 +52,19 @@ interface ClickUpState {
   bindings: Record<string, CuBinding>; // project_id → bound list
   sync: Record<string, CuSyncState>;   // anytype task id → sync state
 }
-interface Links { projects: ProjectLink[]; tasks: Record<string, TaskLink>; wiki: Record<string, WikiLink>; clickup: ClickUpState }
+// Email integration state: IMAP credentials (server-side only), the project
+// that represents the mail account (created on first import), and the
+// uid → Anytype task id dedupe map (survives disconnects — a disconnect
+// clears the password only, never the imported tasks).
+interface EmailState {
+  host: string;
+  port: number;
+  user: string;
+  pass: string;
+  project_id: string;
+  uids: Record<string, string>;
+}
+interface Links { projects: ProjectLink[]; tasks: Record<string, TaskLink>; wiki: Record<string, WikiLink>; clickup: ClickUpState; email: EmailState }
 
 function loadJson<T>(path: string, fallback: T): T {
   try {
@@ -64,7 +79,7 @@ function saveJson(path: string, v: unknown) {
 }
 
 let config: Config = loadJson<Config>(CONFIG_PATH, { api_key: "", space_id: "", space_name: "", task_keys: { done: "done", due: "due_date" } });
-let links: Links = loadJson<Links>(LINKS_PATH, { projects: [], tasks: {}, wiki: {}, clickup: { token: "", tasks: {}, bindings: {}, sync: {} } });
+let links: Links = loadJson<Links>(LINKS_PATH, { projects: [], tasks: {}, wiki: {}, clickup: { token: "", tasks: {}, bindings: {}, sync: {} }, email: { host: "", port: 993, user: "", pass: "", project_id: "", uids: {} } });
 if (config.api_key) setApiKey(config.api_key);
 
 const saveConfig = () => saveJson(CONFIG_PATH, config);
@@ -73,6 +88,7 @@ if (!links.wiki) { links.wiki = {}; saveLinks(); } // upgrade path for pre-wiki 
 if (!links.clickup) { links.clickup = { token: "", tasks: {}, bindings: {}, sync: {} }; saveLinks(); } // upgrade path for pre-ClickUp link indexes
 if (!links.clickup.bindings) { links.clickup.bindings = {}; saveLinks(); } // upgrade path for pre-sync stores
 if (!links.clickup.sync) { links.clickup.sync = {}; saveLinks(); } // upgrade path for pre-sync stores
+if (!links.email) { links.email = { host: "", port: 993, user: "", pass: "", project_id: "", uids: {} }; saveLinks(); } // upgrade path for pre-email link indexes
 
 const STATUSES = ["backlog", "in_progress", "review", "done"] as const;
 
@@ -100,6 +116,11 @@ function needSpace(): Response | null {
 }
 
 function atErr(e: unknown): Response {
+  if (e instanceof ImapError) {
+    if (e.status === 401) return json({ error: e.message }, 401);
+    if (e.status === 400) return json({ error: e.message }, 400);
+    return json({ error: `mail server: ${e.message}` }, 502);
+  }
   if (e instanceof ClickUpError) {
     if (e.status === 401 || e.status === 403)
       return json({ error: "ClickUp rejected that token — check it and try again" }, 401);
@@ -291,7 +312,7 @@ const server = Bun.serve({
       }
       if (path === "/api/disconnect" && method === "POST") {
         config = { api_key: "", space_id: "", space_name: "", task_keys: { done: "done", due: "due_date" } };
-        links = { projects: [], tasks: {}, wiki: {} };
+        links = { projects: [], tasks: {}, wiki: {}, clickup: { token: "", tasks: {}, bindings: {}, sync: {} }, email: { host: "", port: 993, user: "", pass: "", project_id: "", uids: {} } };
         setApiKey("");
         saveConfig();
         saveLinks();
@@ -430,6 +451,8 @@ const server = Bun.serve({
           for (const cid of Object.keys(links.clickup.tasks)) {
             if (!links.tasks[links.clickup.tasks[cid]]) delete links.clickup.tasks[cid];
           }
+          // A deleted email-account project is forgotten so the next import recreates it
+          if (links.email && links.email.project_id === pid) links.email.project_id = "";
           links.projects = links.projects.filter((p) => p.id !== pid);
           saveLinks();
           return json({ ok: true });
@@ -946,6 +969,108 @@ const server = Bun.serve({
         binding.last_sync = new Date().toISOString();
         saveLinks();
         return json({ ok: true, report, binding });
+      }
+
+      // ---------- email integration (IMAP: starred emails → tasks) ----------
+      // Credentials live only in gitignored data/links.json and every mail
+      // call is proxied through the server: the browser never sees the
+      // password, and no GET ever returns it. The mail account IS the
+      // project — the first import creates a native Anytype project named
+      // after the account and later imports reuse it.
+      const needEmail = (): Response | null =>
+        links.email.host ? null : json({ error: "email not connected" }, 401);
+      const emailLabel = (): string =>
+        links.email.user.includes("@") ? links.email.user : `${links.email.user}@${links.email.host}`;
+
+      if (path === "/api/integrations/email/status" && method === "GET") {
+        return json({
+          connected: !!links.email.host,
+          account: links.email.host ? emailLabel() : "",
+          project_id: links.email.project_id || null,
+        });
+      }
+      if (path === "/api/integrations/email/connect" && method === "POST") {
+        const b = await readBody(req);
+        const cfg = {
+          host: String(b.host || "").trim(),
+          port: Number(b.port) > 0 ? Number(b.port) : 993,
+          user: String(b.user || "").trim(),
+          pass: String(b.pass || ""),
+        };
+        await validateImap(cfg); // throws ImapError on bad credentials / unreachable
+        links.email.host = cfg.host;
+        links.email.port = cfg.port;
+        links.email.user = cfg.user;
+        links.email.pass = cfg.pass;
+        saveLinks();
+        return json({ ok: true, account: emailLabel() });
+      }
+      if (path === "/api/integrations/email/disconnect" && method === "POST") {
+        // Credentials go; the project and its imported tasks stay (they are
+        // unlinked-never-deleted, like every other import). The uid dedupe
+        // map survives so a reconnect doesn't duplicate tasks.
+        links.email.host = "";
+        links.email.user = "";
+        links.email.pass = "";
+        saveLinks();
+        return json({ ok: true });
+      }
+      if (path === "/api/integrations/email/starred" && method === "GET") {
+        const g = needEmail();
+        if (g) return g;
+        const mails = await fetchStarred(links.email);
+        return json({
+          account: emailLabel(),
+          mails: mails.map((m) => ({ ...m, imported: !!links.email.uids[m.uid] })),
+        });
+      }
+      if (path === "/api/integrations/email/import" && method === "POST") {
+        const gate = needSpace();
+        if (gate) return gate;
+        const g = needEmail();
+        if (g) return g;
+        const b = await readBody(req);
+        const uids: string[] = Array.isArray(b.uids) ? b.uids.map((u: any) => String(u)) : [];
+        if (!uids.length) return json({ error: "pick at least one email" }, 400);
+        // The email account is the project: create it once, reuse it after.
+        let pid = links.email.project_id;
+        if (!pid || !links.projects.some((p) => p.id === pid)) {
+          const o = await createObject(config.space_id, {
+            name: `✉ ${emailLabel()}`,
+            type_key: "page",
+            body: `Starred emails imported from ${emailLabel()} over IMAP.`,
+            icon: "✉",
+          });
+          pid = String(o.id);
+          links.projects.unshift({ id: pid, source: "imported", added_at: new Date().toISOString() });
+          links.email.project_id = pid;
+          saveLinks();
+        }
+        const mails = await fetchStarred(links.email);
+        const byUid = new Map(mails.map((m) => [m.uid, m]));
+        let imported = 0;
+        let skipped = 0;
+        for (const uid of uids) {
+          if (links.email.uids[uid]) { skipped++; continue; } // already imported
+          const m = byUid.get(uid);
+          if (!m) { skipped++; continue; } // no longer starred / gone
+          const notes = [
+            `From: ${m.from || "unknown"}`,
+            m.date ? `Date: ${m.date}` : "",
+            "",
+            m.snippet || "",
+          ].join("\n").trim();
+          const task = await createLinkedTask(pid, {
+            title: m.subject || "(no subject)",
+            notes,
+            due_date: "",
+            status: "backlog",
+          }, "imported");
+          links.email.uids[uid] = task.id;
+          imported++;
+        }
+        saveLinks();
+        return json({ ok: true, imported, skipped, project_id: pid }, 201);
       }
 
       // ---------- search (for import pickers) ----------
