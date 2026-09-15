@@ -660,9 +660,18 @@ td[data-act="due"] { cursor: pointer; white-space: nowrap; }
 }
 .tt-menu button:hover { background: var(--muted); }
 .tt-edit { width: 100%; font-size: 13px; padding: 4px 6px; }
-/* drag-and-drop nesting */
-.ttable tbody tr[draggable="true"] { cursor: grab; }
-.ttable tbody tr.tt-dragging { opacity: 0.4; cursor: grabbing; }
+/* drag-and-drop nesting (pointer-based; drag starts on the ⋮⋮ handle) */
+.tt-handle-cell { width: 30px; padding-left: 10px !important; padding-right: 2px !important; }
+.tt-handle { cursor: grab; color: var(--muted-foreground); font-size: 13px; letter-spacing: -2px;
+  user-select: none; -webkit-user-select: none; touch-action: none;
+  padding: 2px 5px; border-radius: 4px; display: inline-block; }
+.tt-handle:hover { color: var(--foreground); background: var(--muted); }
+body.tt-nodrag, body.tt-nodrag * { user-select: none !important; -webkit-user-select: none !important; cursor: grabbing !important; }
+.tt-drag-ghost { position: fixed; z-index: 9999; pointer-events: none; background: var(--popover);
+  border: 1px solid var(--sol-blue); border-radius: 6px; padding: 6px 10px; font-size: 13px;
+  max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  box-shadow: var(--shadow-md); opacity: 0.95; }
+.ttable tbody tr.tt-dragging { opacity: 0.4; }
 .ttable tbody tr.tt-drop-ok { box-shadow: inset 0 0 0 2px var(--sol-blue); background: color-mix(in srgb, var(--sol-blue) 12%, transparent); }
 .ttable tbody tr.tt-drop-bad { cursor: not-allowed; box-shadow: inset 0 0 0 2px var(--sol-red); }
 .tt-unnest-zone {

@@ -1262,7 +1262,8 @@ function tblRowHtml(t, d) {
   const chev = hasKids
     ? `<button class="tt-chev" data-chev="${esc(t.id)}" title="${open ? "Collapse prerequisites" : "Expand prerequisites"}">${open ? "▾" : "▸"}</button>`
     : `<span class="tt-chev-sp"></span>`;
-  return `<tr data-row="${esc(t.id)}" draggable="true">
+  return `<tr data-row="${esc(t.id)}">
+    <td class="tt-handle-cell"><span class="tt-handle" data-handle="${esc(t.id)}" title="Drag onto another task to nest as prerequisite">⋮⋮</span></td>
     <td data-act="title" style="padding-left:${10 + d * 22}px">${chev}<span class="tt-title ${t.status === "done" ? "done" : ""}">${esc(t.title)}</span>${t.child_count ? ` <span class="badge badge-secondary tt-kids">▸ ${t.child_count}</span>` : ""}</td>
     <td data-act="status">${statusPill(t.status)}</td>
     <td data-act="due">${tblDueCell(t)}</td>
@@ -1300,7 +1301,7 @@ function drawRows() {
   }
   tbody.innerHTML = rows.length
     ? rows.map(({ t, d }) => tblRowHtml(t, d)).join("")
-    : `<tr><td colspan="6"><div class="empty" style="padding:24px">No tasks match.</div></td></tr>`;
+    : `<tr><td colspan="7"><div class="empty" style="padding:24px">No tasks match.</div></td></tr>`;
   const cnt = $("#tt-count");
   if (cnt) cnt.textContent = `${rows.length} of ${boardTasks.length} shown`;
   $$("#tab-body th[data-sort]").forEach((th) => {
@@ -1325,6 +1326,7 @@ function renderTable() {
     <div class="card tt-wrap">
       <table class="ttable">
         <thead><tr>
+          <th style="width:30px" title="Drag handle"></th>
           <th data-sort="title">Task</th>
           <th data-sort="status">Status</th>
           <th data-sort="due">Due</th>
@@ -1366,22 +1368,18 @@ function renderTable() {
     else if (act === "status") editStatusInline(td, t);
     else if (act === "due") editDueInline(td, t);
   });
-  /* HTML5 drag-and-drop nesting (delegated; plain clicks still hit the
-     click handler above — a drag only starts after the mouse moves). */
+  /* Pointer-based drag-and-drop nesting: native HTML5 drag on <tr> is
+     unreliable in Chrome (mousedown+move selects text instead of starting
+     the drag), so dragging starts from the ⋮⋮ handle cell and is tracked
+     with pointer events. Plain clicks still hit the click handler above. */
   const tbody = $("#tt-body");
-  tbody.addEventListener("dragstart", tblDragStart);
-  tbody.addEventListener("dragover", tblDragOver);
-  tbody.addEventListener("dragleave", tblDragLeave);
-  tbody.addEventListener("drop", tblDrop);
-  if (!tblDocDragEndWired) {
-    tblDocDragEndWired = true;
-    document.addEventListener("dragend", tblDragEnd); // rows may be re-rendered mid-drag
-  }
-  const zone = $("#tt-unnest");
-  if (zone) {
-    zone.addEventListener("dragover", ttUnnestOver);
-    zone.addEventListener("dragleave", ttUnnestLeave);
-    zone.addEventListener("drop", ttUnnestDrop);
+  tbody.addEventListener("pointerdown", tblPtrDown);
+  if (!tblDocPtrWired) {
+    tblDocPtrWired = true;
+    document.addEventListener("pointermove", tblPtrMove);
+    document.addEventListener("pointerup", tblPtrUp);
+    document.addEventListener("pointercancel", tblPtrUp);
+    document.addEventListener("keydown", tblPtrKey);
   }
 }
 
@@ -1550,10 +1548,16 @@ function nestPicker(tid, onDone) {
 }
 
 /* ---------- table drag-and-drop nesting ---------- */
+/* Pointer-based: native HTML5 drag on <tr> is unreliable in Chrome
+   (mousedown+move selects text instead of starting the drag), so the drag
+   starts on the ⋮⋮ handle cell and is tracked with pointer events. */
 let tblDragId = null;
-let tblDocDragEndWired = false;
-
-function tblRowOf(e) { return e.target && e.target.closest ? e.target.closest("tr[data-row]") : null; }
+let tblPtr = null;        // pending press: { id, x0, y0 }
+let tblDragging = false;
+let tblGhost = null;
+let tblHoverId = null;    // row id currently under the pointer while dragging
+let tblHoverZone = false; // unnest zone currently under the pointer
+let tblDocPtrWired = false;
 
 /* Why is this drop rejected? "self" | "desc" | "anc" | null */
 function tblNestRejectReason(tid, targetId) {
@@ -1578,31 +1582,85 @@ function tblNestRejectReason(tid, targetId) {
   return null;
 }
 
-function tblDragStart(e) {
-  const tr = tblRowOf(e);
-  if (!tr) return;
-  tblDragId = tr.dataset.row;
-  try { e.dataTransfer.setData("text/plain", tblDragId); } catch (err) {} // required by Firefox
-  e.dataTransfer.effectAllowed = "move";
-  tr.classList.add("tt-dragging");
+function tblPtrDown(e) {
+  const h = e.target && e.target.closest ? e.target.closest("[data-handle]") : null;
+  if (!h || (e.button !== undefined && e.button !== 0)) return;
+  tblPtr = { id: h.dataset.handle, x0: e.clientX, y0: e.clientY };
+}
+
+function tblBeginDrag() {
+  tblDragging = true;
+  tblDragId = tblPtr.id;
+  document.body.classList.add("tt-nodrag");
+  const sel = (typeof CSS !== "undefined" && CSS.escape) ? CSS.escape(tblDragId) : tblDragId;
+  const tr = document.querySelector(`#tt-body tr[data-row="${sel}"]`);
+  if (tr) tr.classList.add("tt-dragging");
   const zone = $("#tt-unnest");
   if (zone) zone.classList.add("show");
+  const g = document.createElement("div");
+  g.className = "tt-drag-ghost";
+  const t = boardTasks.find((x) => x.id === tblDragId);
+  g.textContent = t ? t.title : "";
+  document.body.appendChild(g);
+  tblGhost = g;
 }
 
-function tblDragOver(e) {
-  if (!tblDragId) return;
-  const tr = tblRowOf(e);
-  if (!tr) return;
-  e.preventDefault();
-  e.dataTransfer.dropEffect = "move";
-  const ok = !tblNestRejectReason(tblDragId, tr.dataset.row);
-  tr.classList.toggle("tt-drop-ok", ok);
-  tr.classList.toggle("tt-drop-bad", !ok);
+function tblClearHover() {
+  $$("#tt-body tr.tt-drop-ok, #tt-body tr.tt-drop-bad")
+    .forEach((tr) => tr.classList.remove("tt-drop-ok", "tt-drop-bad"));
+  const zone = $("#tt-unnest");
+  if (zone) zone.classList.remove("tt-drop-ok");
+  tblHoverId = null; tblHoverZone = false;
 }
 
-function tblDragLeave(e) {
-  const tr = tblRowOf(e);
-  if (tr) tr.classList.remove("tt-drop-ok", "tt-drop-bad");
+function tblPtrMove(e) {
+  if (!tblPtr) return;
+  if (!tblDragging) {
+    if (Math.hypot(e.clientX - tblPtr.x0, e.clientY - tblPtr.y0) < 6) return;
+    tblBeginDrag();
+  }
+  if (e.cancelable) e.preventDefault();
+  if (tblGhost) {
+    tblGhost.style.left = (e.clientX + 12) + "px";
+    tblGhost.style.top = (e.clientY + 14) + "px";
+  }
+  const el = document.elementFromPoint ? document.elementFromPoint(e.clientX, e.clientY) : null;
+  const tr = el && el.closest ? el.closest("#tt-body tr[data-row]") : null;
+  const zone = !tr && el && el.closest ? el.closest("#tt-unnest") : null;
+  tblClearHover();
+  if (tr) {
+    const ok = !tblNestRejectReason(tblDragId, tr.dataset.row);
+    tr.classList.toggle("tt-drop-ok", ok);
+    tr.classList.toggle("tt-drop-bad", !ok);
+    tblHoverId = tr.dataset.row;
+  } else if (zone) {
+    zone.classList.add("tt-drop-ok");
+    tblHoverZone = true;
+  }
+}
+
+function tblPtrUp(e) {
+  if (!tblPtr) return;
+  const wasDrag = tblDragging;
+  const dragId = tblDragId, targetId = tblHoverId, toZone = tblHoverZone;
+  tblPtr = null; tblDragging = false;
+  tblDragEnd();
+  if (!wasDrag) return; // plain click on the handle — nothing to do
+  if (toZone) { moveTaskNesting(dragId, null); return; }
+  if (!targetId) return;
+  const reason = tblNestRejectReason(dragId, targetId);
+  if (reason) {
+    toast(reason === "anc" ? "That would create a cycle" : "Can't nest a task inside itself or its own subtasks", true);
+    return;
+  }
+  moveTaskNesting(dragId, targetId);
+}
+
+function tblPtrKey(e) {
+  if (e && e.key === "Escape" && tblDragging) {
+    tblPtr = null; tblDragging = false;
+    tblDragEnd();
+  }
 }
 
 function tblDragEnd() {
@@ -1611,22 +1669,9 @@ function tblDragEnd() {
     .forEach((tr) => tr.classList.remove("tt-dragging", "tt-drop-ok", "tt-drop-bad"));
   const zone = $("#tt-unnest");
   if (zone) zone.classList.remove("show", "tt-drop-ok");
-}
-
-async function tblDrop(e) {
-  if (!tblDragId) return;
-  const tr = tblRowOf(e);
-  if (!tr) return;
-  e.preventDefault();
-  const targetId = tr.dataset.row;
-  const reason = tblNestRejectReason(tblDragId, targetId);
-  const dragId = tblDragId;
-  tblDragEnd();
-  if (reason) {
-    toast(reason === "anc" ? "That would create a cycle" : "Can't nest a task inside itself or its own subtasks", true);
-    return;
-  }
-  await moveTaskNesting(dragId, targetId);
+  if (tblGhost) { tblGhost.remove(); tblGhost = null; }
+  if (document.body) document.body.classList.remove("tt-nodrag");
+  tblClearHover();
 }
 
 async function moveTaskNesting(tid, parentId) {
@@ -1645,21 +1690,8 @@ async function moveTaskNesting(tid, parentId) {
   }
 }
 
-/* Top-level drop zone: dragging onto it unnests the task. */
-function ttUnnestOver(e) {
-  if (!tblDragId) return;
-  e.preventDefault();
-  e.dataTransfer.dropEffect = "move";
-  e.currentTarget.classList.add("tt-drop-ok");
-}
-function ttUnnestLeave(e) { e.currentTarget.classList.remove("tt-drop-ok"); }
-async function ttUnnestDrop(e) {
-  if (!tblDragId) return;
-  e.preventDefault();
-  const dragId = tblDragId;
-  tblDragEnd();
-  await moveTaskNesting(dragId, null);
-}
+/* (Drop handling now lives in tblPtrUp via elementFromPoint — the unnest
+   zone is highlighted and activated while a pointer drag is over it.) */
 
 /* Prerequisites section inside the task detail modal. */
 function prereqBoxHtml(t) {
@@ -1719,7 +1751,6 @@ globalThis.__test = { taskCard, duePill, fmtDate, COLUMNS, md, vOverview, vProje
   taskChildren, checkPrereqsDone, refreshTasks, nestPicker, openRowMenu, prereqBoxHtml,
   tblSaveCollapsed, tblLoadCollapsed,
   prereqBannedIds, tblNestRejectReason, moveTaskNesting,
-  tblDragStart, tblDragOver, tblDragLeave, tblDrop, tblDragEnd,
-  ttUnnestOver, ttUnnestLeave, ttUnnestDrop, tblDragIdOf: () => tblDragId,
+  tblPtrDown, tblPtrMove, tblPtrUp, tblPtrKey, tblDragEnd, tblDragIdOf: () => tblDragId,
   setBoardTasks: (t) => { boardTasks = t; }, boardTasksOf: () => boardTasks,
   setPid: (p) => { _pid = p; } };
