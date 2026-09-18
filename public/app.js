@@ -76,7 +76,7 @@ function duePill(t) {
   if (!t.dueMs || t.status === "done") return "";
   const start = new Date(); start.setHours(0, 0, 0, 0);
   const day = 86400000;
-  if (t.dueMs < start.getTime()) return `<span class="badge badge-destructive">◷ overdue · ${esc(fmtDate(t.dueMs))}</span>`;
+  if (t.dueMs < start.getTime()) return `<span class="badge badge-urgent">◷ overdue · ${esc(fmtDate(t.dueMs))}</span>`;
   if (t.dueMs < start.getTime() + day) return `<span class="badge badge-warning">◷ today</span>`;
   if (t.dueMs < start.getTime() + 7 * day) return `<span class="badge badge-secondary">◷ ${esc(fmtDate(t.dueMs))}</span>`;
   return `<span class="badge badge-secondary">◷ ${esc(fmtDate(t.dueMs))}</span>`;
@@ -260,7 +260,7 @@ async function vOverview() {
     <div class="card" style="padding:8px 10px">
       ${d.attention.map((a) => `
         <div class="import-row" data-goto="${esc(a.project_id)}">
-          <span class="badge ${a.overdue ? "badge-destructive" : "badge-warning"}">${a.overdue ? "overdue" : "due soon"}</span>
+          <span class="badge ${a.overdue ? "badge-urgent" : "badge-warning"}">${a.overdue ? "overdue" : "due soon"}</span>
           <span style="flex:1"><b>${esc(a.title)}</b> <span style="color:var(--muted-foreground)">· ${esc(a.project_name)} · ${esc(fmtDate(a.dueMs))}</span></span>
           <span style="color:var(--muted-foreground)">→</span>
         </div>`).join("")}
@@ -272,7 +272,7 @@ async function vOverview() {
       <div class="card health-row" data-goto="${p.id}">
         <div class="p-ico">${esc(p.icon)}</div>
         <div class="p-main"><div class="p-name">${esc(p.name)}</div>
-          <div class="p-sub">${p.done}/${p.total} tasks done${est ? ` · <span class="est-chip">⏱ ${est} remaining</span>` : ""}${p.overdue ? ` · <b style="color:var(--destructive)">${p.overdue} overdue</b>` : ""}</div></div>
+          <div class="p-sub">${p.done}/${p.total} tasks done${est ? ` · <span class="est-chip">⏱ ${est} remaining</span>` : ""}${p.overdue ? ` · <b style="color:var(--urgent)">${p.overdue} overdue</b>` : ""}</div></div>
         <div class="progress"><div class="progress-indicator" style="width:${p.progress}%"></div></div>
         <div style="font-weight:600;font-variant-numeric:tabular-nums;width:44px;text-align:right">${p.progress}%</div>
       </div>`;
