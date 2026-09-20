@@ -410,6 +410,42 @@ function timeHealthWidget(taskMap, projectList) {
   </div>`;
 }
 
+/* ---------- My Day time-health widget (compact) ----------
+   Same estimator as the Overview time-health widget (taskMinutes: explicit
+   override, else the word-bag point estimate, else 0), scoped to My Day
+   tasks (overdue + due today + in progress). Shows the day's estimated
+   total, the minutes remaining on open tasks, and a health band against a
+   workday budget: <=6h "On track", <=8h "Tight", >8h "Over".
+   "Over" uses the urgent terracotta — red stays reserved for errors and
+   destructive actions. Completed tasks still count toward the day's total
+   but not toward remaining. */
+const MH_ON_TRACK = 6 * 60; // 6h — the day comfortably fits
+const MH_TIGHT = 8 * 60;    // 8h — a full workday budget
+function dayHealth(remainingMin) {
+  if (remainingMin > MH_TIGHT) return { key: "over", label: "Over" };
+  if (remainingMin > MH_ON_TRACK) return { key: "tight", label: "Tight" };
+  return { key: "ok", label: "On track" };
+}
+const MH_BADGE = { ok: "badge-default", tight: "badge-warning", over: "badge-urgent" };
+
+function mydayTimeHealthWidget(tasks) {
+  const list = tasks || [];
+  const open = list.filter((t) => t && t.status !== "done");
+  const total = list.reduce((s, t) => s + taskMinutes(t), 0);
+  const remaining = open.reduce((s, t) => s + taskMinutes(t), 0);
+  const estimated = open.filter((t) => taskMinutes(t) > 0).length;
+  const unestimated = open.length - estimated;
+  const h = dayHealth(remaining);
+  return `<div class="card myday-health">
+    <div class="mh-main">
+      <div class="th-label">Time health</div>
+      <div class="mh-nums">≈${Estimate.fmtMins(remaining)} <span class="th-total-sub">remaining of ≈${Estimate.fmtMins(total)} estimated</span></div>
+      <div class="mh-foot">based on ${estimated} estimated task${estimated === 1 ? "" : "s"} · ${unestimated} task${unestimated === 1 ? "" : "s"} had no estimate</div>
+    </div>
+    <span class="badge ${MH_BADGE[h.key]}">${h.label}</span>
+  </div>`;
+}
+
 // Fetch task lists for the displayed projects; a failed project just yields no estimate.
 async function fetchProjectTasks(projects) {
   const lists = await Promise.all((projects || []).map(async (p) => {
@@ -456,7 +492,8 @@ function renderMyDay() {
   const all = [...d.overdue, ...d.today, ...d.in_progress];
   const byId = new Map(all.map((t) => [t.id, t]));
   view.innerHTML = all.length
-    ? mydaySectionHtml("overdue", "Overdue", d.overdue)
+    ? mydayTimeHealthWidget(all)
+      + mydaySectionHtml("overdue", "Overdue", d.overdue)
       + mydaySectionHtml("today", "Due today", d.today)
       + mydaySectionHtml("in_progress", "In progress", d.in_progress)
     : `<div class="card"><div class="empty"><span class="big">☀</span>Nothing due — your day is clear.<br><br><button class="btn btn-default" id="md-empty-add">Quick add a task</button></div></div>`;
@@ -2545,6 +2582,7 @@ globalThis.__test = { taskCard, duePill, fmtDate, COLUMNS, md, vOverview, vProje
   openCmdK, cmdkClose, cmdkSearch, cmdkRender, cmdkMove, cmdkActivate,
   cmdkState: () => ({ items: cmdkItems, sel: cmdkSel }),
   quickAddModal, taskMinutes, parseEstInput, estChipFor, blockedBadge, recurrenceBadge, subtaskBadge,
+  mydayTimeHealthWidget, dayHealth, MH_ON_TRACK, MH_TIGHT,
   shakeCard, readRecurrence, blockerBoxHtml, recurrenceBoxHtml, subtaskBoxHtml, crossProjectTaskPicker,
   setTaskDone,
   tblSaveCollapsed, tblLoadCollapsed,

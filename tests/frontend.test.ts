@@ -266,6 +266,78 @@ describe("My Day section folding", () => {
   });
 });
 
+describe("My Day time-health widget", () => {
+  const mkH = (id: string, title: string, estimate_min: number | null, status = "backlog") => ({
+    id, project_id: "p1", project_name: "Acme", project_icon: "🚀", title,
+    status, dueMs: today + 3600000, estimate_min,
+    blocked: false, blockers: [], recurrence: null, subtask_done: 0, subtask_total: 0,
+  });
+  test("dayHealth bands: on track at/below 6h, tight at/below 8h, over beyond", () => {
+    expect(T.dayHealth(60)).toEqual({ key: "ok", label: "On track" });
+    expect(T.MH_ON_TRACK).toBe(360);
+    expect(T.dayHealth(360)).toEqual({ key: "ok", label: "On track" });
+    expect(T.MH_TIGHT).toBe(480);
+    expect(T.dayHealth(361)).toEqual({ key: "tight", label: "Tight" });
+    expect(T.dayHealth(480)).toEqual({ key: "tight", label: "Tight" });
+    expect(T.dayHealth(481)).toEqual({ key: "over", label: "Over" });
+  });
+  test("totals: completed tasks count in the day's total but not in remaining", () => {
+    const html = T.mydayTimeHealthWidget([
+      mkH("a", "Done thing", 30, "done"),
+      mkH("b", "Open thing", 30),
+      mkH("c", "zzz qqq www", null), // no lexicon hit: counts as 0
+    ]);
+    expect(html).toContain("≈60m"); // total: 30 done + 30 open
+    expect(html).toContain("≈30m"); // remaining: open tasks only
+    expect(html).toContain("remaining of ≈60m estimated");
+    expect(html).toContain("1 estimated task");
+    expect(html).toContain("1 task had no estimate");
+  });
+  test("tasks without estimates count as 0 and are noted", () => {
+    const html = T.mydayTimeHealthWidget([mkH("a", "zzz qqq www", null)]);
+    expect(html).toContain("≈0m");
+    expect(html).toContain("0 estimated tasks");
+    expect(html).toContain("1 task had no estimate");
+    expect(html).toContain("On track");
+  });
+  test("pill matches the band and never uses the destructive red", () => {
+    const ok = T.mydayTimeHealthWidget([mkH("a", "Small", 30)]);
+    expect(ok).toContain("On track");
+    expect(ok).toContain("badge-default");
+    const tight = T.mydayTimeHealthWidget([mkH("a", "Big", 400)]);
+    expect(tight).toContain("Tight");
+    expect(tight).toContain("badge-warning");
+    const over = T.mydayTimeHealthWidget([mkH("a", "Huge", 600)]);
+    expect(over).toContain("Over");
+    expect(over).toContain("badge-urgent");
+    expect(over).not.toContain("badge-destructive");
+  });
+  test("counts exactly the tasks it is given (My Day scope decided by the caller)", () => {
+    const html = T.mydayTimeHealthWidget([mkH("a", "One", 45)]);
+    expect(html).toContain("≈45m");
+    expect(T.mydayTimeHealthWidget([])).toContain("≈0m");
+  });
+  test("renders at the top of My Day, above the sections", async () => {
+    await T.vMyDay();
+    const html = document.getElementById("view").innerHTML;
+    expect(html).toContain("myday-health");
+    expect(html).toContain("Time health");
+    expect(html.indexOf("myday-health")).toBeLessThan(html.indexOf("myday-section"));
+  });
+  test("empty My Day keeps its zero state with no widget garbage", async () => {
+    const bak = { overdue: MYDAY.overdue, today: MYDAY.today, in_progress: MYDAY.in_progress };
+    MYDAY.overdue = []; MYDAY.today = []; MYDAY.in_progress = [];
+    await T.vMyDay();
+    const html = document.getElementById("view").innerHTML;
+    expect(html).toContain("Nothing due");
+    expect(html).not.toContain("myday-health");
+    expect(html).not.toContain("NaN");
+    expect(html).not.toContain("undefined");
+    MYDAY.overdue = bak.overdue; MYDAY.today = bak.today; MYDAY.in_progress = bak.in_progress;
+    await T.vMyDay();
+  });
+});
+
 describe("Cmd+K palette", () => {
   test("opens with an input and empty-state hint", () => {
     T.openCmdK();
