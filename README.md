@@ -33,6 +33,11 @@ ANYTYPE_API_KEY=... bun src/server.ts   # key from Anytype → Settings → API 
 | Project ↔ task link | `data/links.json` (local index only) |
 | Project ↔ article link | `data/links.json` (local index only) |
 | Kanban column | `data/links.json` (`backlog` / `in_progress` / `review` / `done`) |
+| Task blockers | `data/links.json` (`blocked_by`: cross-project dependency links; cycle-checked) |
+| Task recurrence | `data/links.json` (`recurrence`: daily / weekly+weekdays / monthly) |
+| Task subtasks | `data/links.json` (`subtasks`: checklist items with done flags) |
+| Explicit estimate | `data/links.json` (`estimate_min`: manual override; blank = auto-estimated) |
+| Sprints | `data/links.json` (`sprints`: name, Mon–Sun range, cross-project task list, archived flag) |
 
 Due dates are calendar days, not instants: the day you pick in the task modal is the day that renders back, in every timezone (date-only values are parsed as local midnight, and "overdue" means the due day has passed).
 
@@ -115,6 +120,45 @@ Estimates surface five ways, all styled with the Solarized accent palette and no
 
 Per-project estimates are computed client-side by fetching each displayed project's task list (one extra request per project; a project whose tasks fail to load simply shows no estimate).
 
+The task modal's **Estimate override** field sets an explicit estimate (`30m`, `2h`, `1h30m` — blank restores the auto-estimate). Explicit estimates are counted separately: the time-health footer and sprint summaries report how many tasks had *explicit* estimates versus auto-estimated ones.
+
+### My Day · Quick-add · Cmd+K
+
+**My Day** (`#/myday`, the default landing view) is the cross-project daily triage: every task grouped into **Overdue** (due day past), **Due today**, and **In progress** — with its estimate chip, due badge, blocked badge, recurrence badge, subtask progress, and project pill. Completing or editing from My Day works exactly like on the board; overdue tasks stay put until their due date moves or they get done.
+
+**Quick-add** (topbar `+`, or the `+ Quick add` button) creates a task from one line: `Review contract tomorrow 2h #Acme` picks the project by name when it matches, parses due dates (`today`, `tomorrow`, weekday names, `2026-09-21`, `in 3 days`) and durations (`30m`, `2h`, `1h30m`). Ambiguous or multi-match input falls back to a picker instead of guessing wrong.
+
+**Cmd+K** (`⌘K` / `Ctrl+K`) is a command palette over everything: jump to My Day, overview, any project, or the sprint list; fuzzy-search tasks across all projects (blocker/completion state included in results); and fire actions — quick-add, new project, new sprint, new task in the current project. Fully keyboard driven (↑↓ navigate, Enter runs, Esc closes).
+
+### Task dependencies (blocked by)
+
+Tasks can declare **blockers** — other tasks (same project or any project, via a cross-project picker) that must finish first. Blockers live in `data/links.json` (`blocked_by`), alongside the kanban column:
+
+- The task modal's **Blocked by** section lists each blocker with its live status and a one-click remove; the picker excludes the task itself and anything that would close a dependency cycle (cycles are rejected server-side with a 400).
+- Blocked cards carry a **⛔ blocked** badge; **dropping a blocked task into Done is refused** with a shake and a toast naming the blockers.
+- Completing a blocked task from its checkbox/modal asks for **explicit confirmation** naming the unfinished blockers; confirming proceeds, and when a task is completed its blockers' links dissolve — dependents unblock automatically.
+- Deleting a task scrubs it from every other task's `blocked_by` list.
+
+This is separate from Table-view *prerequisites* (parent/child nesting): blockers are cross-project dependency links, prerequisites are same-project nesting.
+
+### Recurring tasks
+
+The task modal's **Repeats** section sets daily, weekly (on selected weekdays), or monthly recurrence. Completing a repeating task spawns the **next instance automatically** — the new task carries the recurrence forward, its due date computed from the completion day in local-calendar arithmetic (end-of-month clamps: Jan 31 monthly → Feb 28), while the completed instance keeps its history. The old instance's recurrence is cleared so it never spawns twice. Cards and My Day rows show a **🔁 daily/weekly/monthly** badge.
+
+### Subtasks
+
+Every task modal has a **Subtasks** section: add, rename, delete, and toggle checklist items. Cards and My Day rows show a compact `✓ n/m` progress pill; completing a task with unfinished subtasks offers a one-tap **complete-them-all** confirmation.
+
+### Sprints (`#/sprints`)
+
+Time-boxed focus lists across projects. A sprint has a name, a **Monday–Sunday range** (defaults to the current week), and an explicit task list — add tasks from any project via the cross-project picker, remove them without touching the tasks themselves.
+
+The sprint detail view groups tasks by status and shows a **velocity summary**: completed task count, total estimated minutes, and how many tasks had *explicit* estimates (auto-estimates still count toward the total but are labeled as such). **Closing** a sprint archives it and returns unfinished tasks to their projects' Backlog columns.
+
+### Ascent-only metadata
+
+Dependencies (`blocked_by`), recurrence, subtasks, explicit estimates, and sprints are **Ascent-only metadata** in `data/links.json` — they never sync to ClickUp or write extra fields to Anytype. ClickUp sync remains best-effort and content-level (title, done, due date, notes).
+
 ### API
 
 The Bun server exposes a small facade over Anytype:
@@ -126,6 +170,10 @@ POST   /api/pair/complete     {challenge_id, code} → stores API key
 GET    /api/spaces            list Anytype spaces
 GET/POST /api/config          chosen space
 GET    /api/overview          KPIs + project health + overdue/due-soon (a task is overdue only once its due *day* has passed — due-today is never overdue)
+GET    /api/myday             cross-project triage: {overdue[], due_today[], in_progress[]} (local-calendar days)
+GET    /api/quicksearch?q=... tasks + projects + nav actions for Cmd+K
+POST   /api/quick-add/parse   {text} → {title, project_id?, due_date?, estimate_min?} without creating
+POST   /api/quick-add         {text} → creates the task (project matched by name, falls back to picker)
 GET    /api/projects          projects with progress
 POST   /api/projects          {name, description, icon} → Anytype page
 POST   /api/projects/import   {object_id} link an existing page
@@ -133,8 +181,13 @@ GET/PATCH/DELETE /api/projects/:id
 GET    /api/projects/:id/tasks
 POST   /api/projects/:id/tasks        {title, notes, due_date, status} → Anytype task
 POST   /api/projects/:id/tasks/import {object_ids}
-PATCH/DELETE /api/tasks/:id  {title?, done?, due_date?, notes?, status?}
+PATCH/DELETE /api/tasks/:id  {title?, done?, due_date?, notes?, status?, blocked_by?, recurrence?, subtasks?, estimate_min?} — 409 needs_confirm when completing a blocked task; 400 on dependency cycles
 PATCH /api/tasks/:id/parent  {parent_id | null} → nest as a prerequisite (400 on cycles or cross-project parents)
+GET/POST /api/sprints        sprints (archived excluded by default)
+GET/PATCH/DELETE /api/sprints/:id
+POST   /api/sprints/:id/tasks   {task_ids} → add cross-project tasks to the sprint
+DELETE /api/sprints/:id/tasks/:taskId
+POST   /api/sprints/:id/close   archive; unfinished tasks return to their Backlog columns
 GET    /api/projects/:id/wiki     wiki articles for a project
 POST   /api/projects/:id/wiki     {title, body} → Anytype page
 POST   /api/projects/:id/wiki/import {object_ids}

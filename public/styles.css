@@ -320,7 +320,9 @@ input[type="checkbox"]:disabled { cursor: not-allowed; opacity: 0.5; }
   position: fixed; inset: 0; z-index: 100;
   background: rgb(0 0 0 / 0.32);
   -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
-  display: grid; place-items: center; padding: 1.25rem;
+  /* flex, not grid: this Chromium build ignores max-width:100% on grid items,
+     which let dialogs overflow narrow viewports */
+  display: flex; align-items: center; justify-content: center; padding: 1.25rem;
   animation: dialog-fade 0.25s var(--ease-ios);
 }
 .dialog-content {
@@ -587,8 +589,11 @@ body.drawer-open .scrim { opacity: 1; visibility: visible; transition: opacity 0
   .topbar { padding: 0.75rem 1rem; gap: 0.625rem; }
   .topbar h1 { font-size: 1.0625rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 38vw; }
   .topbar .sub { display: none; }
-  #topbar-actions { display: flex; gap: 0.375rem; margin-left: auto; }
-  #topbar-actions .btn { padding: 0 0.625rem; }
+  #topbar-actions { display: flex; gap: 0.375rem; margin-left: auto; min-width: 0; flex: 0 1 auto; overflow-x: auto; scrollbar-width: none; }
+  #topbar-actions::-webkit-scrollbar { display: none; }
+  #topbar-actions .btn { padding: 0 0.625rem; flex-shrink: 0; white-space: nowrap; }
+  .topbar .btn-icon { flex-shrink: 0; }
+  .topbar .spacer { flex: 0 1 auto; min-width: 0; }
   .view { padding: 1rem 1rem 3rem; }
   .board {
     display: flex; overflow-x: auto; scroll-snap-type: x mandatory;
@@ -692,3 +697,117 @@ body.tt-nodrag, body.tt-nodrag * { user-select: none !important; -webkit-user-se
 /* prerequisites box in the task detail modal */
 .prereq-box { margin-top: 14px; border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
 .prereq-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 0; }
+
+/* ---------- My Day ---------- */
+.myday-list { display: grid; gap: 0.5rem; margin-bottom: 1.25rem; }
+.myday-row { display: flex; align-items: center; gap: 0.75rem; padding: 0.75rem 1rem; cursor: pointer; }
+.myday-row:hover { border-color: var(--ring); }
+.myday-proj { color: var(--muted-foreground); font-size: 0.75rem; white-space: nowrap; }
+.section-title { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted-foreground); font-weight: 700; margin: 0.25rem 0 0.5rem; }
+
+/* ---------- quick-add ---------- */
+.qa-preview { display: flex; align-items: center; gap: 0.5rem; min-height: 1.75rem; margin: -0.25rem 0 0.75rem; flex-wrap: wrap; }
+.qa-title { font-size: 0.875rem; color: var(--muted-foreground); font-style: italic; }
+
+/* ---------- Cmd+K palette ---------- */
+.cmdk-overlay {
+  position: fixed; inset: 0; z-index: 90;
+  background: rgba(0, 0, 0, 0.35);
+  display: flex; justify-content: center; align-items: flex-start;
+  padding: 12vh 1rem 1rem;
+}
+.cmdk {
+  width: min(36rem, 100%);
+  background: var(--popover); border: 1px solid var(--border);
+  border-radius: var(--radius-lg); box-shadow: var(--shadow-md);
+  overflow: hidden;
+}
+.cmdk input {
+  width: 100%; border: none; background: transparent; color: var(--foreground);
+  padding: 0.875rem 1rem; font-size: 1rem; outline: none;
+  border-bottom: 1px solid var(--border);
+}
+.cmdk-list { max-height: 22rem; overflow-y: auto; padding: 0.375rem; }
+.cmdk-item {
+  display: flex; align-items: center; gap: 0.625rem;
+  padding: 0.625rem 0.75rem; border-radius: 8px; cursor: pointer;
+  color: var(--foreground); font-size: 0.875rem;
+}
+.cmdk-item.sel { background: var(--accent); }
+.cmdk-kind {
+  flex: 0 0 auto; font-size: 0.6875rem; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--muted-foreground); min-width: 3.5rem;
+}
+.cmdk-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cmdk-sub { flex: 0 0 auto; color: var(--muted-foreground); font-size: 0.75rem; }
+.cmdk-foot {
+  display: flex; gap: 1rem; padding: 0.5rem 1rem;
+  border-top: 1px solid var(--border);
+  color: var(--muted-foreground); font-size: 0.75rem;
+}
+.cmdk-foot kbd {
+  border: 1px solid var(--border); border-radius: 4px; padding: 0 0.375rem;
+  font-family: inherit; background: var(--muted);
+}
+
+/* ---------- blocked badge + shake ---------- */
+.badge-blocked {
+  background: color-mix(in srgb, var(--urgent) 16%, transparent);
+  color: var(--urgent); border: 1px solid color-mix(in srgb, var(--urgent) 40%, transparent);
+  font-weight: 600;
+}
+@keyframes shake-x {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-6px); }
+  40% { transform: translateX(5px); }
+  60% { transform: translateX(-4px); }
+  80% { transform: translateX(3px); }
+}
+.shake { animation: shake-x 0.4s ease; }
+@media (prefers-reduced-motion: reduce) {
+  .shake { animation: none !important; }
+}
+
+/* ---------- blockers / recurrence / subtasks in task modal ---------- */
+.rec-weekdays { display: flex; gap: 0.375rem; flex-wrap: wrap; margin-top: 0.5rem; }
+.wd-row { display: flex; gap: 0.375rem; flex-wrap: wrap; }
+/* Weekday picker: round day pills, NOT the global iOS toggle switch. */
+.wd {
+  position: relative; display: inline-flex; align-items: center; justify-content: center;
+  width: 2rem; height: 2rem; border-radius: 50%;
+  border: 1px solid var(--border); background: var(--muted);
+  color: var(--muted-foreground); font-size: 0.75rem; font-weight: 600; cursor: pointer;
+}
+.wd > input[type="checkbox"] {
+  position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer;
+}
+.wd > input[type="checkbox"]::after { content: none; }
+.wd:has(> input[type="checkbox"]:checked) {
+  background: var(--primary); border-color: var(--primary); color: var(--primary-foreground);
+}
+/* Grid safety: never let dialog content force the viewport wider. */
+.dialog-content { min-width: 0; }
+.wd-pill {
+  border: 1px solid var(--border); background: var(--muted); color: var(--muted-foreground);
+  border-radius: 999px; padding: 0.25rem 0.625rem; font-size: 0.75rem; cursor: pointer;
+}
+.wd-pill.on { background: var(--primary); color: var(--primary-foreground); border-color: var(--primary); font-weight: 600; }
+.st-row { display: flex; align-items: center; gap: 0.625rem; padding: 0.375rem 0; border-bottom: 1px solid var(--border); }
+.st-row:last-child { border-bottom: none; }
+.st-title { flex: 1 1 auto; font-size: 0.875rem; cursor: text; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.st-title.done { text-decoration: line-through; color: var(--muted-foreground); }
+.st-empty { font-size: 0.8125rem; color: var(--muted-foreground); padding: 0.25rem 0; }
+.st-addrow { display: flex; gap: 0.5rem; margin-top: 0.5rem; }
+.st-addrow input { flex: 1 1 auto; }
+.st-edit { width: 100%; }
+
+/* ---------- sprints ---------- */
+.sprint-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(16rem, 1fr)); gap: 0.75rem; margin-bottom: 1.25rem; }
+.sprint-card { cursor: pointer; padding: 1rem 1.25rem; }
+.sprint-card:hover { border-color: var(--ring); }
+.sprint-sum { padding: 1rem 1.25rem; margin-bottom: 1rem; }
+
+@media (max-width: 48rem) {
+  .sprint-grid { grid-template-columns: 1fr; }
+  .myday-proj { display: none; }
+}

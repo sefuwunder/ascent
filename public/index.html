@@ -17,8 +17,10 @@
       <button class="btn btn-ghost btn-icon drawer-close" id="drawer-close" aria-label="Close menu">✕</button>
     </div>
     <div class="nav-label">Workspace</div>
+    <a class="nav-item" href="#/myday" data-nav="myday"><span class="ico">☀</span> My Day</a>
     <a class="nav-item" href="#/overview" data-nav="overview"><span class="ico">◈</span> Overview</a>
     <a class="nav-item" href="#/projects" data-nav="projects"><span class="ico">▦</span> Projects</a>
+    <a class="nav-item" href="#/sprints" data-nav="sprints"><span class="ico">🏁</span> Sprints</a>
     <div class="nav-label">System</div>
     <a class="nav-item" href="#/setup" data-nav="setup"><span class="ico">⚙</span> Connection</a>
     <div class="side-foot"><span class="dot"></span><span id="conn-label">Anytype connected</span></div>
@@ -29,6 +31,8 @@
       <div><h1 id="page-title">Overview</h1><div class="sub" id="page-sub"></div></div>
       <div class="spacer"></div>
       <div id="topbar-actions"></div>
+      <button class="btn btn-ghost btn-icon" id="quick-add-btn" title="Quick add task" aria-label="Quick add task">＋</button>
+      <button class="btn btn-ghost btn-icon" id="cmdk-btn" title="Search (⌘K)" aria-label="Search">⌘K</button>
       <button class="btn btn-ghost btn-icon" id="theme-toggle" aria-label="Toggle light / dark" title="Toggle light / dark">☾</button>
     </header>
     <div class="view" id="view"></div>

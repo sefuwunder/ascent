@@ -13,7 +13,12 @@ async function api(method, path, body) {
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(j.error || `request failed (${r.status})`);
+  if (!r.ok) {
+    const e = new Error(j.error || `request failed (${r.status})`);
+    e.status = r.status;
+    e.data = j;
+    throw e;
+  }
   return j;
 }
 const GET = (p) => api("GET", p);
@@ -86,6 +91,68 @@ const isoDate = (ms) => {
   const d = new Date(ms);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 };
+
+/* Estimate chip honoring an explicit quick-add estimate override; falls back
+   to the word-bag estimator. */
+function estChipFor(t) {
+  if (t && typeof t.estimate_min === "number" && t.estimate_min > 0) {
+    const size = estSizeForMins(t.estimate_min);
+    return `<span class="est-chip est-${size}" title="Explicit estimate: ${Estimate.fmtMins(t.estimate_min)}">⏱ ≈${Estimate.fmtMins(t.estimate_min)}</span>`;
+  }
+  return Estimate.estChip(t && t.title);
+}
+
+/* Billable minutes for a task: explicit override, else the word-bag point
+   estimate, else 0. Feeds sprint velocity and My Day readouts. */
+function taskMinutes(t) {
+  if (t && typeof t.estimate_min === "number" && t.estimate_min > 0) return t.estimate_min;
+  const e = Estimate.estimateTask(t && t.title);
+  return e ? e.point : 0;
+}
+
+/* Parse an estimate override like "30m", "45 min", "2h", "1.5 hours". */
+function parseEstInput(s) {
+  const m = String(s || "").trim().match(/^(\d+(?:\.\d+)?)\s*(h|hr|hrs|hours?|m|min|mins|minutes?)$/i);
+  if (!m) return null;
+  return Math.round(parseFloat(m[1]) * (m[2].toLowerCase().startsWith("h") ? 60 : 1));
+}
+
+/* Mark a task done/undone through the blocked-completion guard: a blocked
+   task needs explicit confirmation (the server enforces it with 409; the
+   client asks once and retries with confirm:true). Returns the updated task,
+   or null when the user cancelled the confirmation. */
+async function patchDone(t, wantDone, confirm) {
+  const r = await PATCH(`/api/tasks/${t.id}`, { done: wantDone, ...(confirm ? { confirm: true } : {}) });
+  const task = r.task;
+  if (wantDone && task.next_instance) {
+    toast(`🔁 Next “${task.next_instance.title}” created — due ${fmtDate(task.next_instance.dueMs)}`);
+  }
+  return task;
+}
+async function setTaskDone(t, wantDone) {
+  try {
+    return await patchDone(t, wantDone, false);
+  } catch (e) {
+    if (wantDone && e && e.status === 409 && e.data && e.data.needs_confirm) {
+      const names = (e.data.blockers || []).map((b) => `“${b && b.title ? b.title : b}”`).join(", ");
+      if (confirm(`“${t.title}” is blocked by ${names}.\n\nMark it done anyway?`)) {
+        return await patchDone(t, wantDone, true);
+      }
+      return null;
+    }
+    throw e;
+  }
+}
+
+function shakeCard(tid) {
+  const sel = (typeof CSS !== "undefined" && CSS.escape) ? CSS.escape(tid) : tid;
+  const el = document.querySelector(`[data-tid="${sel}"]`);
+  if (!el || !el.classList) return;
+  el.classList.remove("shake");
+  void el.offsetWidth; // restart the animation
+  el.classList.add("shake");
+  setTimeout(() => el.classList.remove("shake"), 500);
+}
 
 function setTitle(t, sub = "") {
   $("#page-title").textContent = t;
@@ -160,7 +227,7 @@ let setupState = { step: 1, challenge_id: "", spaces: [] };
 async function vSetup() {
   showChrome(false);
   const st = await GET("/api/status").catch(() => ({ paired: false, has_space: false }));
-  if (st.paired && st.has_space) { location.hash = "#/overview"; return; }
+  if (st.paired && st.has_space) { location.hash = "#/myday"; return; }
   setupState.step = st.paired ? 2 : 1;
   if (st.paired) {
     try { setupState.spaces = (await GET("/api/spaces")).spaces; } catch (e) { toast(e.message, true); }
@@ -223,7 +290,7 @@ function renderSetup() {
         try {
           const r = await POST("/api/config", { space_id: b.dataset.space });
           toast(`Space “${r.space.name}” connected`);
-          location.hash = "#/overview";
+          location.hash = "#/myday";
         } catch (e) { toast(e.message, true); }
       };
     });
@@ -352,6 +419,343 @@ async function fetchProjectTasks(projects) {
   const m = {};
   (projects || []).forEach((p, i) => { m[p.id] = lists[i]; });
   return m;
+}
+
+/* ---------- My Day: cross-project home view ---------- */
+let pendingTaskOpen = null;    // {pid, tid} — open the task modal after routing
+let pendingArticleOpen = null; // {pid, aid} — select the article after routing
+function openTaskInProject(pid, tid) {
+  pendingTaskOpen = { pid, tid };
+  const h = `#/projects/${pid}`;
+  if (location.hash === h) route();
+  else location.hash = h;
+}
+
+function mydayRowHtml(t) {
+  return `
+    <div class="card myday-row" data-mpid="${esc(t.project_id)}" data-mtid="${esc(t.id)}">
+      <div class="checkbox task-check ${t.status === "done" ? "on" : ""}">${t.status === "done" ? "✓" : ""}</div>
+      <div style="flex:1;min-width:0">
+        <div class="task-title ${t.status === "done" ? "done" : ""}">${esc(t.title)}</div>
+        <div class="task-meta">${estChipFor(t)}${duePill(t)}${blockedBadge(t)}${recurrenceBadge(t)}${subtaskBadge(t)}
+          <span class="myday-proj">${esc(t.project_icon || "")} ${esc(t.project_name || "")}</span></div>
+      </div>
+      <span style="color:var(--muted-foreground)">→</span>
+    </div>`;
+}
+
+async function vMyDay() {
+  const st = await GET("/api/status").catch(() => ({}));
+  showChrome(true, st.space_name || "");
+  setNav("myday");
+  setTitle("My Day", st.space_name ? `Workspace · ${st.space_name}` : "Workspace");
+  setActions(`<button class="btn btn-default" id="md-quick">+ Quick add</button>`);
+  view.innerHTML = `<div style="display:grid;gap:12px"><div class="skeleton" style="height:64px"></div><div class="skeleton" style="height:64px"></div></div>`;
+  let d;
+  try { d = await GET("/api/myday"); }
+  catch (e) { view.innerHTML = `<div class="empty"><span class="big">⚠</span>${esc(e.message)}</div>`; return; }
+  const all = [...d.overdue, ...d.today, ...d.in_progress];
+  const byId = new Map(all.map((t) => [t.id, t]));
+  const sec = (label, items) => items.length ? `
+    <div class="section-title">${label} <span class="col-count">${items.length}</span></div>
+    <div class="myday-list">${items.map(mydayRowHtml).join("")}</div>` : "";
+  view.innerHTML = all.length ? `
+    ${sec("Overdue", d.overdue)}
+    ${sec("Due today", d.today)}
+    ${sec("In progress", d.in_progress)}`
+    : `<div class="card"><div class="empty"><span class="big">☀</span>Nothing due — your day is clear.<br><br><button class="btn btn-default" id="md-empty-add">Quick add a task</button></div></div>`;
+  $$(".myday-row").forEach((el) => {
+    const chk = el.querySelector(".task-check");
+    if (chk) chk.onclick = async (e) => {
+      e.stopPropagation();
+      const t = byId.get(el.dataset.mtid);
+      if (!t || t.status === "done") return;
+      try { const nt = await setTaskDone(t, true); if (nt) route(); }
+      catch (err) { toast(err.message, true); }
+    };
+    el.onclick = () => openTaskInProject(el.dataset.mpid, el.dataset.mtid);
+  });
+  $("#md-quick").onclick = () => quickAddModal();
+  const ea = $("#md-empty-add");
+  if (ea) ea.onclick = () => quickAddModal();
+}
+
+/* ---------- Cmd+K command palette ---------- */
+let cmdkSel = 0;
+let cmdkItems = []; // {kind, id, pid?, title, sub?}
+function cmdkClose() {
+  const r = $("#cmdk-root");
+  if (r) r.remove();
+  cmdkItems = []; cmdkSel = 0;
+}
+function openCmdK() {
+  if ($("#cmdk-root")) return;
+  const root = document.createElement("div");
+  root.id = "cmdk-root";
+  root.innerHTML = `
+    <div class="cmdk-overlay" id="cmdk-ovl">
+      <div class="cmdk" role="dialog" aria-modal="true" aria-label="Search">
+        <input id="cmdk-input" placeholder="Search tasks, projects, wiki…" autocomplete="off">
+        <div id="cmdk-list" class="cmdk-list"></div>
+        <div class="cmdk-foot"><span><kbd>↑</kbd><kbd>↓</kbd> navigate</span><span><kbd>↵</kbd> open</span><span><kbd>esc</kbd> close</span></div>
+      </div>
+    </div>`;
+  document.body.appendChild(root);
+  $("#cmdk-ovl").addEventListener("mousedown", (e) => { if (e.target.id === "cmdk-ovl") cmdkClose(); });
+  const input = $("#cmdk-input");
+  let timer = null;
+  input.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(() => cmdkSearch(input.value), 160); });
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown") { e.preventDefault(); cmdkMove(1); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); cmdkMove(-1); }
+    else if (e.key === "Enter") { e.preventDefault(); cmdkActivate(); }
+    else if (e.key === "Escape") { cmdkClose(); }
+    e.stopPropagation();
+  });
+  cmdkSearch("");
+  setTimeout(() => input.focus(), 30);
+}
+async function cmdkSearch(q) {
+  const list = $("#cmdk-list");
+  if (!list) return;
+  const query = q.trim();
+  let tasks = [], projects = [], articles = [];
+  if (query) {
+    try {
+      const r = await GET(`/api/quicksearch?q=${encodeURIComponent(query)}`);
+      tasks = r.tasks || []; projects = r.projects || []; articles = r.articles || [];
+    } catch (e) { list.innerHTML = `<div class="empty" style="padding:16px">${esc(e.message)}</div>`; return; }
+  }
+  cmdkItems = [];
+  if (query) cmdkItems.push({ kind: "create", id: "", title: `＋ Create task “${query}”`, sub: "quick add" });
+  for (const p of projects) cmdkItems.push({ kind: "project", id: p.id, title: `${p.icon} ${p.name}`, sub: "project" });
+  for (const t of tasks) cmdkItems.push({ kind: "task", id: t.id, pid: t.project_id, title: t.title, sub: t.project_name });
+  for (const a of articles) cmdkItems.push({ kind: "article", id: a.id, pid: a.project_id, title: `📄 ${a.title}`, sub: `${a.project_name} · wiki` });
+  cmdkSel = 0;
+  cmdkRender(query);
+}
+function cmdkRender(query) {
+  const list = $("#cmdk-list");
+  if (!list) return;
+  if (!cmdkItems.length) {
+    list.innerHTML = `<div class="empty" style="padding:20px">${query ? "No matches." : "Type to search tasks, projects, and wiki."}</div>`;
+    return;
+  }
+  list.innerHTML = cmdkItems.map((it, i) => `
+    <div class="cmdk-item ${i === cmdkSel ? "sel" : ""}" data-ci="${i}">
+      <span class="cmdk-kind">${esc(it.kind === "create" ? "＋" : it.kind)}</span>
+      <span class="cmdk-title">${esc(it.title)}</span>
+      ${it.sub ? `<span class="cmdk-sub">${esc(it.sub)}</span>` : ""}
+    </div>`).join("");
+  $$("#cmdk-list [data-ci]").forEach((el) => {
+    el.onclick = () => { cmdkSel = Number(el.dataset.ci); cmdkActivate(); };
+    el.onmousemove = () => {
+      const n = Number(el.dataset.ci);
+      if (n !== cmdkSel) { cmdkSel = n; cmdkRender(query); }
+    };
+  });
+  const sel = list.querySelector(".cmdk-item.sel");
+  if (sel && sel.scrollIntoView) sel.scrollIntoView({ block: "nearest" });
+}
+function cmdkMove(d) {
+  if (!cmdkItems.length) return;
+  cmdkSel = (cmdkSel + d + cmdkItems.length) % cmdkItems.length;
+  cmdkRender($("#cmdk-input") ? $("#cmdk-input").value : "");
+}
+function cmdkActivate() {
+  const it = cmdkItems[cmdkSel];
+  if (!it) return;
+  const q = $("#cmdk-input") ? $("#cmdk-input").value.trim() : "";
+  cmdkClose();
+  if (it.kind === "create") { quickAddModal(q); return; }
+  if (it.kind === "project") { location.hash = `#/projects/${it.id}`; return; }
+  if (it.kind === "task") { openTaskInProject(it.pid, it.id); return; }
+  if (it.kind === "article") {
+    pendingArticleOpen = { pid: it.pid, aid: it.id };
+    const h = `#/projects/${it.pid}/wiki`;
+    if (location.hash === h) route(); else location.hash = h;
+  }
+}
+
+/* ---------- quick-add: natural-language task creation ---------- */
+async function quickAddModal(preset) {
+  let projects = [];
+  try { projects = (await GET("/api/projects")).projects || []; }
+  catch (e) { toast(e.message, true); return; }
+  if (!projects.length) { toast("Create a project first", true); return; }
+  openModal("Quick add", `
+    ${field("Task", input("text", preset || "", "text", 'placeholder="Call dentist tomorrow 30m" autocomplete="off"'))}
+    <div id="qa-preview" class="qa-preview"></div>
+    <div class="formgrid">
+      ${field("Project", select("project_id", projects.map((p) => [p.id, `${p.icon} ${p.name}`])))}
+      ${field("Due date (override)", input("due", "", "date"))}
+    </div>
+    ${field("Estimate (override)", input("estimate_min", "", "text", 'placeholder="30m, 2h — blank for auto"'))}
+    <div style="font-size:12px;color:var(--muted-foreground);margin-top:10px">Natural language: “tomorrow”, “friday”, “in 3 days”, “next monday”, “2h”, “30m”.</div>`,
+    async (d, close) => {
+      if (!d.text.trim()) { toast("Task title is required", true); return; }
+      try {
+        const { parsed } = await POST("/api/quick-add", {
+          text: d.text,
+          project_id: d.project_id,
+          ...(d.due ? { due: d.due } : {}),
+          estimate_min: parseEstInput(d.estimate_min),
+        });
+        close();
+        let when = "";
+        if (parsed.dueISO) {
+          const m = parsed.dueISO.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+          if (m) when = ` — due ${fmtDate(new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])).getTime())}`;
+        }
+        toast(`Task created${when}`);
+        route();
+      } catch (e) { toast(e.message, true); }
+    }, "Add task");
+  const tin = $("#modal-root [name=text]") || document.querySelector('#modal-root [name="text"]');
+  let timer = null;
+  const prev = async () => {
+    const box = $("#qa-preview");
+    if (!box || !tin) return;
+    const v = tin.value.trim();
+    if (!v) { box.innerHTML = ""; return; }
+    try {
+      const p = await POST("/api/quick-add/parse", { text: v });
+      const bits = [];
+      if (p.dueISO) bits.push(`📅 ${p.dueISO}`);
+      if (p.estimateMin) bits.push(`⏱ ≈${Estimate.fmtMins(p.estimateMin)}`);
+      box.innerHTML = `<span class="qa-title">${esc(p.title) || "…"}</span> ` +
+        bits.map((b) => `<span class="badge badge-secondary">${esc(b)}</span>`).join(" ");
+    } catch (e) { /* preview is best-effort */ }
+  };
+  if (tin && tin.addEventListener) tin.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(prev, 200); });
+}
+
+/* ---------- sprints ---------- */
+function sprintStats(tasks) {
+  let total = 0, done = 0, estimated = 0, count = 0, doneCount = 0;
+  for (const t of tasks || []) {
+    count++;
+    const m = taskMinutes(t);
+    const explicit = typeof t.estimate_min === "number" && t.estimate_min > 0;
+    if (m > 0) { total += m; if (explicit) estimated++; }
+    if (t.status === "done") {
+      doneCount++;
+      if (m > 0) done += m;
+    }
+  }
+  return {
+    total, done, estimated, count, doneCount,
+    pct: count ? Math.round((doneCount / count) * 100) : 0,
+  };
+}
+
+async function vSprints() {
+  const st = await GET("/api/status").catch(() => ({}));
+  showChrome(true, st.space_name || "");
+  setNav("sprints");
+  setTitle("Sprints", "Time-boxed focus");
+  setActions(`<button class="btn btn-default" id="sp-new">+ New sprint</button>`);
+  view.innerHTML = `<div class="skeleton" style="height:120px"></div>`;
+  let d;
+  try { d = await GET("/api/sprints"); }
+  catch (e) { view.innerHTML = `<div class="empty"><span class="big">⚠</span>${esc(e.message)}</div>`; return; }
+  const card = (s) => `
+    <div class="card sprint-card" data-sprint="${esc(s.id)}">
+      <div style="display:flex;align-items:center;gap:10px">
+        <div style="flex:1;min-width:0"><div class="p-name">${esc(s.name)}</div>
+        <div class="p-sub">${esc(s.start)} → ${esc(s.end)} · ${s.total} task${s.total === 1 ? "" : "s"}</div></div>
+        <span class="badge ${s.status === "open" ? "badge-default" : "badge-secondary"}">${esc(s.status)}</span>
+      </div>
+    </div>`;
+  view.innerHTML = `
+    ${d.open.length ? `<div class="section-title">Open</div><div class="sprint-grid">${d.open.map(card).join("")}</div>` : ""}
+    ${d.closed.length ? `<div class="section-title">Archived</div><div class="sprint-grid">${d.closed.map(card).join("")}</div>` : ""}
+    ${!d.open.length && !d.closed.length ? `<div class="card"><div class="empty"><span class="big">🏁</span>No sprints yet — time-box your next week of work.</div></div>` : ""}`;
+  $$("[data-sprint]").forEach((el) => { el.onclick = () => { location.hash = `#/sprints/${el.dataset.sprint}`; }; });
+  $("#sp-new").onclick = () => sprintModal();
+}
+
+function sprintModal(existing) {
+  // New sprints default to this week Monday–Sunday, computed client-side.
+  const now = new Date();
+  const dow = (now.getDay() + 6) % 7;
+  const mon = new Date(now.getFullYear(), now.getMonth(), now.getDate() - dow);
+  const sun = new Date(mon.getTime() + 6 * 86400000);
+  const s = existing || {};
+  openModal(existing ? "Edit sprint" : "New sprint", `
+    ${field("Name", input("name", s.name || ""))}
+    <div class="formgrid">
+      ${field("Start", input("start", s.start || isoDate(mon.getTime()), "date"))}
+      ${field("End", input("end", s.end || isoDate(sun.getTime()), "date"))}
+    </div>`,
+    async (d, close) => {
+      if (!d.name.trim()) { toast("Sprint name is required", true); return; }
+      if (existing) await PATCH(`/api/sprints/${existing.id}`, { name: d.name, start: d.start, end: d.end });
+      else await POST("/api/sprints", { name: d.name, start: d.start, end: d.end });
+      close();
+      toast(existing ? "Sprint updated" : "Sprint created");
+      route();
+    }, existing ? "Save changes" : "Create sprint");
+}
+
+async function vSprintDetail(id) {
+  const st = await GET("/api/status").catch(() => ({}));
+  showChrome(true, st.space_name || "");
+  setNav("sprints");
+  view.innerHTML = `<div class="empty"><span class="big">◌</span>Loading sprint…</div>`;
+  let d;
+  try { d = await GET(`/api/sprints/${id}`); }
+  catch (e) { view.innerHTML = `<div class="empty"><span class="big">⚠</span>${esc(e.message)}<br><br><a class="btn btn-outline" href="#/sprints">Back to sprints</a></div>`; return; }
+  const s = d.sprint;
+  const stats = sprintStats(d.tasks);
+  setTitle(s.name, `${s.start} → ${s.end}`);
+  setActions(`
+    ${s.status === "open" ? `<button class="btn btn-outline btn-sm" id="sd-add">+ Add tasks</button>
+    <button class="btn btn-outline btn-sm" id="sd-edit">Edit</button>
+    <button class="btn btn-default btn-sm" id="sd-close">Close sprint</button>` : ""}
+    <a class="btn btn-ghost btn-sm" href="#/sprints">Back</a>`);
+  const cols = COLUMNS.map(([key, label]) => {
+    const items = d.tasks.filter((t) => t.status === key);
+    return `<div class="kanban-col"><div class="col-head">${label}<span class="col-count">${items.length}</span></div>
+      <div class="col-body">${items.map((t) => `
+        <div class="card task-card" data-tid="${esc(t.id)}" data-spid="${esc(t.project_id)}">
+          <div class="task-title">${esc(t.title)}</div>
+          <div class="task-meta">${estChipFor(t)}${duePill(t)}${blockedBadge(t)}${subtaskBadge(t)}
+            <span class="myday-proj">${esc(t.project_name)}</span></div>
+        </div>`).join("") || `<div class="st-empty">—</div>`}</div></div>`;
+  }).join("");
+  view.innerHTML = `
+    <div class="card sprint-sum">
+      <div class="th-label">Sprint velocity</div>
+      <div class="th-total">${stats.doneCount}/${stats.count} tasks
+        <span class="th-total-sub">≈${Estimate.fmtMins(stats.done)} of ≈${Estimate.fmtMins(stats.total)} completed</span></div>
+      <div class="progress" style="margin-top:8px"><div class="progress-indicator" style="width:${stats.pct}%"></div></div>
+      <div class="th-foot">${stats.estimated} of ${stats.count} tasks had explicit estimates${stats.estimated < stats.count ? "; others auto-estimated" : ""}</div>
+    </div>
+    <div class="board">${cols}</div>`;
+  $$("#view [data-tid]").forEach((el) => {
+    el.onclick = () => openTaskInProject(el.dataset.spid, el.dataset.tid);
+  });
+  const add = $("#sd-add");
+  if (add) add.onclick = () => {
+    crossProjectTaskPicker("Add to sprint…", d.tasks.map((t) => t.id), async (pick) => {
+      if (!pick) return;
+      try { await POST(`/api/sprints/${id}/tasks`, { task_id: pick.id }); toast(`Added “${pick.title}”`); route(); }
+      catch (e) { toast(e.message, true); }
+    });
+  };
+  const edit = $("#sd-edit");
+  if (edit) edit.onclick = () => sprintModal(s);
+  const closeBtn = $("#sd-close");
+  if (closeBtn) closeBtn.onclick = async () => {
+    const unfinished = d.tasks.filter((t) => t.status !== "done").length;
+    if (!confirm(`Close “${s.name}”? ${unfinished} unfinished task${unfinished === 1 ? "" : "s"} return${unfinished === 1 ? "s" : ""} to the project backlog.`)) return;
+    try {
+      const r = await POST(`/api/sprints/${id}/close`, {});
+      toast(`Sprint closed — ${r.returned_to_backlog} task${r.returned_to_backlog === 1 ? "" : "s"} back to backlog`);
+      route();
+    } catch (e) { toast(e.message, true); }
+  };
 }
 
 /* ---------- projects ---------- */
@@ -929,6 +1333,11 @@ async function vProjectDetail(id, tab = "board") {
     renderWikiPane();
     $("#pd-new-article").onclick = () => articleModal(id);
     $("#pd-import-wiki").onclick = () => importModal("wiki", id);
+    if (pendingArticleOpen && pendingArticleOpen.pid === id) {
+      const aid = pendingArticleOpen.aid;
+      pendingArticleOpen = null;
+      selectArticle(aid);
+    }
     return;
   }
 
@@ -949,6 +1358,11 @@ async function vProjectDetail(id, tab = "board") {
   $("#pd-new-task").onclick = () => taskModal(id);
   $("#pd-edit").onclick = () => projectModal(p);
   $("#pd-import").onclick = () => importModal("task", id);
+  if (pendingTaskOpen && pendingTaskOpen.pid === id && tab !== "wiki") {
+    const t = boardTasks.find((x) => x.id === pendingTaskOpen.tid);
+    pendingTaskOpen = null;
+    if (t) setTimeout(() => taskModal(id, t), 0);
+  }
   const syncBtn = $("#pd-sync");
   if (syncBtn) syncBtn.onclick = () => syncNow(id);
   const emSyncBtnEl = $("#pd-email-sync");
@@ -1080,6 +1494,20 @@ async function deleteArticle() {
   } catch (e) { toast(e.message, true); }
 }
 
+function blockedBadge(t) {
+  if (!t.blocked) return "";
+  const names = (t.blockers || []).map((b) => b.title).join(", ");
+  return `<span class="badge badge-blocked" title="Blocked by: ${esc(names)}">⛔ blocked</span>`;
+}
+function recurrenceBadge(t) {
+  if (!t.recurrence) return "";
+  return `<span class="badge badge-secondary" title="Repeats ${esc(t.recurrence.kind)} — completing spawns the next instance">🔁 ${esc(t.recurrence.kind)}</span>`;
+}
+function subtaskBadge(t) {
+  if (!t.subtask_total) return "";
+  return `<span class="badge badge-secondary" title="${t.subtask_done} of ${t.subtask_total} subtasks done">✓ ${t.subtask_done}/${t.subtask_total}</span>`;
+}
+
 function taskCard(t) {
   const el = document.createElement("div");
   el.className = "card task-card";
@@ -1091,14 +1519,17 @@ function taskCard(t) {
       <div class="task-title ${t.status === "done" ? "done" : ""}">${esc(t.title)}</div>
     </div>
     ${t.notes ? `<div class="task-notes">${esc(t.notes)}</div>` : ""}
-    <div class="task-meta">${Estimate.estChip(t.title)}${duePill(t)}${t.child_count ? `<span class="badge badge-secondary" title="${t.child_count} prerequisite${t.child_count === 1 ? "" : "s"}">▸ ${t.child_count}</span>` : ""}${t.source === "imported" ? `<span class="badge badge-outline">imported</span>` : ""}</div>`;
+    <div class="task-meta">${estChipFor(t)}${duePill(t)}${blockedBadge(t)}${recurrenceBadge(t)}${subtaskBadge(t)}${t.child_count ? `<span class="badge badge-secondary" title="${t.child_count} prerequisite${t.child_count === 1 ? "" : "s"}">▸ ${t.child_count}</span>` : ""}${t.source === "imported" ? `<span class="badge badge-outline">imported</span>` : ""}</div>`;
   el.querySelector("[data-check]").onclick = async (e) => {
     e.stopPropagation();
-    if (t.status !== "done" && !checkPrereqsDone(t)) return;
+    const wantDone = t.status !== "done";
+    if (wantDone && !checkPrereqsDone(t)) return;
     try {
-      const { task } = await PATCH(`/api/tasks/${t.id}`, { done: t.status !== "done" });
+      const task = await setTaskDone(t, wantDone);
+      if (!task) return; // user cancelled the blocked-task confirmation
       boardTasks = boardTasks.map((x) => (x.id === t.id ? task : x));
       renderBoard();
+      await refreshTasks(currentPid()); // propagate unblock states to other cards
     } catch (err) { toast(err.message, true); }
   };
   el.onclick = (e) => { if (!e.target.closest("[data-check]")) taskModal(currentPid(), t); };
@@ -1135,32 +1566,136 @@ function renderBoard() {
       const t = boardTasks.find((x) => x.id === tid);
       if (!t || t.status === target) return;
       if (target === "done" && !checkPrereqsDone(t)) return;
+      if (target === "done" && t.blocked) {
+        // Blocked tasks cannot be dropped into Done: shake the card and name
+        // the blockers. (The checkbox path asks for confirmation instead.)
+        shakeCard(tid);
+        toast(`Blocked by ${(t.blockers || []).map((b) => `“${b.title}”`).join(", ")}`, true);
+        return;
+      }
       const prev = t.status;
       t.status = target; // optimistic
       renderBoard();
       try {
-        const { task } = await PATCH(`/api/tasks/${tid}`, { status: target });
+        let task;
+        if (target === "done") {
+          task = await setTaskDone(t, true);
+          if (!task) { t.status = prev; renderBoard(); return; }
+        } else {
+          task = (await PATCH(`/api/tasks/${tid}`, { status: target })).task;
+        }
         boardTasks = boardTasks.map((x) => (x.id === tid ? task : x));
       } catch (err) {
         t.status = prev;
         toast(err.message, true);
       }
       renderBoard();
+      if (target === "done") await refreshTasks(currentPid()); // propagate unblocks
     };
   });
+}
+
+/* "Blocked by" section: immediate PATCH on add/remove (needs a picker), so the
+   modal re-opens fresh from server truth. */
+function blockerBoxHtml(t) {
+  return `<div class="prereq-box" style="margin-top:12px">
+    <div style="font-weight:600;margin-bottom:6px">Blocked by</div>
+    <div id="m-blockers"></div>
+    <button class="btn btn-outline btn-sm" id="m-block-add" style="margin-top:8px">⛔ Add blocker…</button>
+    <div style="font-size:12px;color:var(--muted-foreground);margin-top:6px">A blocked task can't be dropped into Done; completing it asks for confirmation.</div>
+  </div>`;
+}
+
+/* Recurrence picker section (saved with the modal form). */
+function recurrenceBoxHtml(t) {
+  const r = t.recurrence || {};
+  const days = ["S", "M", "T", "W", "T", "F", "S"];
+  return `<div class="recur-box" style="margin-top:12px">
+    <div style="font-weight:600;margin-bottom:6px">Repeats</div>
+    <div class="formgrid">
+      ${field("Frequency", select("recurrence", [["", "Never"], ["daily", "Daily"], ["weekly", "Weekly"], ["monthly", "Monthly"]], r.kind || ""))}
+    </div>
+      <div id="m-wdwrap" style="${r.kind === "weekly" ? "" : "display:none"}">
+        <div class="field"><label>On weekdays</label><div class="wd-row">
+          ${days.map((d, i) => `<label class="wd"><input type="checkbox" name="wd${i}"${r.weekdays && r.weekdays.includes(i) ? " checked" : ""}>${d}</label>`).join("")}
+        </div></div>
+      </div>
+    <div style="font-size:12px;color:var(--muted-foreground)">Completing a repeating task spawns the next instance automatically.</div>
+  </div>`;
+}
+function readRecurrence(d) {
+  const kind = d.recurrence;
+  if (kind !== "daily" && kind !== "weekly" && kind !== "monthly") return null;
+  const r = { kind };
+  if (kind === "weekly") r.weekdays = [0, 1, 2, 3, 4, 5, 6].filter((i) => d["wd" + i]);
+  return r;
+}
+
+/* Subtask checklist section: local state, saved with the modal form. */
+function subtaskBoxHtml() {
+  return `<div class="subtask-box" style="margin-top:12px">
+    <div style="font-weight:600;margin-bottom:6px">Subtasks <span id="m-st-count" class="st-count"></span></div>
+    <div id="m-subtasks"></div>
+    <div class="st-add"><input id="m-st-new" placeholder="Add a subtask…" autocomplete="off"><button class="btn btn-outline btn-sm" id="m-st-add">Add</button></div>
+  </div>`;
+}
+
+/* Cross-project task picker (blockers, sprint membership). Rendered as a
+   stacked overlay so cancelling returns to the underlying modal. */
+function crossProjectTaskPicker(title, excludeIds, onPick) {
+  const root = $("#modal-root");
+  const wrap = document.createElement("div");
+  wrap.innerHTML = `
+    <div class="dialog-overlay" id="pk-ovl"><div class="dialog-content" role="dialog" aria-modal="true">
+      <h2 class="dialog-title">${esc(title)}</h2>
+      <input id="pk-search" placeholder="Search all tasks…" autocomplete="off" style="margin-bottom:10px">
+      <div id="pk-list" style="max-height:40vh;overflow:auto"><div class="empty" style="padding:16px">Type to search across all projects.</div></div>
+      <div class="dialog-footer"><button class="btn btn-ghost" id="pk-cancel">Cancel</button></div>
+    </div></div>`;
+  root.appendChild(wrap);
+  const close = () => wrap.remove();
+  $("#pk-cancel").onclick = close;
+  $("#pk-ovl").addEventListener("mousedown", (e) => { if (e.target.id === "pk-ovl") close(); });
+  let timer = null;
+  const draw = async () => {
+    const q = $("#pk-search").value.trim();
+    const list = $("#pk-list");
+    if (!q) { list.innerHTML = `<div class="empty" style="padding:16px">Type to search across all projects.</div>`; return; }
+    list.innerHTML = `<div class="empty" style="padding:16px">Searching…</div>`;
+    try {
+      const { tasks } = await GET(`/api/quicksearch?q=${encodeURIComponent(q)}`);
+      const cands = (tasks || []).filter((x) => !excludeIds.includes(x.id));
+      list.innerHTML = cands.length ? cands.map((x) => `
+        <button class="import-row" data-pk="${esc(x.id)}" style="width:100%;text-align:left;cursor:pointer;background:none;border:none;color:inherit;font:inherit">
+          <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(x.title)}</span>
+          <span style="color:var(--muted-foreground);font-size:12px">${esc(x.project_name || "")}</span>
+          <span class="badge badge-secondary">${esc(colName(x.status))}</span>
+        </button>`).join("") : `<div class="empty" style="padding:16px">No matches.</div>`;
+      $$("#pk-list [data-pk]").forEach((el) => {
+        el.onclick = () => { const pick = cands.find((x) => x.id === el.dataset.pk); close(); onPick(pick); };
+      });
+    } catch (e) { list.innerHTML = `<div class="empty" style="padding:16px">${esc(e.message)}</div>`; }
+  };
+  $("#pk-search").oninput = () => { clearTimeout(timer); timer = setTimeout(draw, 180); };
+  setTimeout(() => $("#pk-search").focus(), 60);
 }
 
 function taskModal(pid, existing) {
   _pid = pid;
   const t = existing || {};
+  let mst = (t.subtasks || []).map((s) => ({ id: s.id, title: s.title, done: !!s.done }));
   openModal(existing ? "Edit task" : "New task", `
     ${field("Title", input("title", t.title || ""))}
-    <div id="m-est-wrap" style="margin:-6px 0 10px;min-height:1.6em">${Estimate.estChip(t.title || "")}</div>
+    <div id="m-est-wrap" style="margin:-6px 0 10px;min-height:1.6em">${estChipFor(t)}</div>
     <div class="formgrid">
       ${field("Status", select("status", COLUMNS.map(([v, l]) => [v, l]), t.status || "backlog"))}
       ${field("Due date", input("due_date", isoDate(t.dueMs), "date"))}
     </div>
     ${field("Notes", `<textarea name="notes" rows="3">${esc(t.notes || "")}</textarea>`)}
+    ${existing ? field("Estimate override", input("estimate_min", t.estimate_min || "", "text", 'placeholder="e.g. 30m, 2h — blank for auto"')) : ""}
+    ${existing ? recurrenceBoxHtml(t) : ""}
+    ${existing ? blockerBoxHtml(t) : ""}
+    ${existing ? subtaskBoxHtml() : ""}
     ${existing ? prereqBoxHtml(t) : ""}
     ${existing ? `<div style="margin-top:14px"><button class="btn btn-destructive btn-sm" id="m-delete">Delete task</button></div>
       ${t.source === "ascent" ? `<div style="font-size:12px;color:var(--muted-foreground);margin-top:8px">Also removes the task object from Anytype.</div>`
@@ -1168,11 +1703,33 @@ function taskModal(pid, existing) {
     <div style="font-size:12px;color:var(--muted-foreground);margin-top:10px">Saved as a native Anytype task object.</div>`,
     async (d, close) => {
       if (!d.title.trim()) { toast("Task title is required", true); return; }
-      const payload = { title: d.title, notes: d.notes, due_date: d.due_date, status: d.status };
+      const payload = {
+        title: d.title, notes: d.notes, due_date: d.due_date, status: d.status,
+        estimate_min: parseEstInput(d.estimate_min),
+        recurrence: readRecurrence(d),
+        subtasks: mst,
+      };
+      const saveOnce = async (withConfirm) => {
+        const { task } = await PATCH(`/api/tasks/${existing.id}`,
+          withConfirm ? { ...payload, confirm: true } : payload);
+        boardTasks = boardTasks.map((x) => (x.id === existing.id ? task : x));
+        if (task.next_instance) {
+          toast(`🔁 Next “${task.next_instance.title}” created — due ${fmtDate(task.next_instance.dueMs)}`);
+        }
+        return task;
+      };
       if (existing) {
         if (d.status === "done" && existing.status !== "done" && !checkPrereqsDone(existing)) return;
-        const { task } = await PATCH(`/api/tasks/${existing.id}`, payload);
-        boardTasks = boardTasks.map((x) => (x.id === existing.id ? task : x));
+        try {
+          await saveOnce(false);
+        } catch (e) {
+          if (e && e.status === 409 && e.data && e.data.needs_confirm) {
+            const names = (e.data.blockers || []).map((b) => `“${b && b.title ? b.title : b}”`).join(", ");
+            if (!confirm(`“${d.title}” is blocked by ${names}.\n\nSave as done anyway?`)) return;
+            try { await saveOnce(true); }
+            catch (e2) { toast(e2.message, true); return; }
+          } else { toast(e.message, true); return; }
+        }
       } else {
         const { task } = await POST(`/api/projects/${pid}/tasks`, payload);
         boardTasks.push(task);
@@ -1188,7 +1745,120 @@ function taskModal(pid, existing) {
   const ti0 = root.querySelector('[name="title"]');
   if (ti0 && ti0.addEventListener) ti0.addEventListener("input", () => {
     const w = $("#m-est-wrap");
-    if (w) w.innerHTML = Estimate.estChip(ti0.value);
+    if (w) w.innerHTML = estChipFor({ title: ti0.value, estimate_min: parseEstInput(root.querySelector('[name="estimate_min"]')?.value) });
+  });
+  const estIn = root.querySelector('[name="estimate_min"]');
+  if (estIn && estIn.addEventListener) estIn.addEventListener("input", () => {
+    const w = $("#m-est-wrap");
+    if (w && ti0) w.innerHTML = estChipFor({ title: ti0.value, estimate_min: parseEstInput(estIn.value) });
+  });
+  const recSel = root.querySelector('[name="recurrence"]');
+  if (recSel) recSel.onchange = () => {
+    const w = $("#m-wdwrap");
+    if (w) w.style.display = recSel.value === "weekly" ? "" : "none";
+  };
+  /* --- blockers (immediate PATCH; modal re-opens fresh) --- */
+  const drawBlockers = () => {
+    const box = $("#m-blockers");
+    if (!box || !existing) return;
+    const bs = existing.blockers || [];
+    box.innerHTML = bs.length ? bs.map((b) => `
+      <div class="prereq-row">
+        <span class="${b.status === "done" ? "tt-title done" : ""}">${esc(b.title)} <span class="badge badge-secondary">${esc(colName(b.status))}</span></span>
+        <button class="btn btn-ghost btn-sm" data-unblock="${esc(b.id)}">Remove</button>
+      </div>`).join("")
+      : `<div style="font-size:12px;color:var(--muted-foreground);margin-bottom:6px">No blockers — this task can be completed freely.</div>`;
+    $$("#m-blockers [data-unblock]").forEach((btn) => {
+      btn.onclick = async () => {
+        try {
+          await PATCH(`/api/tasks/${existing.id}`, {
+            blocked_by: (existing.blocked_by || []).filter((id) => id !== btn.dataset.unblock),
+          });
+          await refreshTasks(pid);
+          taskModal(pid, boardTasks.find((x) => x.id === existing.id) || existing);
+        } catch (e) { toast(e.message, true); }
+      };
+    });
+  };
+  drawBlockers();
+  const blockAdd = $("#m-block-add");
+  if (blockAdd) blockAdd.onclick = () => {
+    crossProjectTaskPicker("“" + existing.title + "” is blocked by…",
+      [existing.id, ...(existing.blocked_by || [])],
+      async (pick) => {
+        if (!pick) return;
+        try {
+          await PATCH(`/api/tasks/${existing.id}`, { blocked_by: [...(existing.blocked_by || []), pick.id] });
+          await refreshTasks(pid);
+          taskModal(pid, boardTasks.find((x) => x.id === existing.id) || existing);
+          toast(`Blocked by “${pick.title}”`);
+        } catch (e) { toast(e.message, true); }
+      });
+  };
+  /* --- subtasks (local state; saved with the form) --- */
+  const drawSubtasks = () => {
+    const box = $("#m-subtasks");
+    const cnt = $("#m-st-count");
+    if (!box) return;
+    const done = mst.filter((s) => s.done).length;
+    if (cnt) cnt.textContent = mst.length ? `${done}/${mst.length}` : "";
+    box.innerHTML = mst.length ? mst.map((s) => `
+      <div class="st-row">
+        <div class="checkbox st-check ${s.done ? "on" : ""}" data-stcheck="${esc(s.id)}">${s.done ? "✓" : ""}</div>
+        <span class="st-title ${s.done ? "done" : ""}" data-sttitle="${esc(s.id)}" title="Click to rename">${esc(s.title)}</span>
+        <button class="btn btn-ghost btn-icon btn-sm" data-stdel="${esc(s.id)}" title="Delete subtask">✕</button>
+      </div>`).join("")
+      : `<div class="st-empty">No subtasks yet — break it down.</div>`;
+    $$("#m-subtasks [data-stcheck]").forEach((el) => {
+      el.onclick = () => {
+        const s = mst.find((x) => x.id === el.dataset.stcheck);
+        if (!s) return;
+        s.done = !s.done;
+        drawSubtasks();
+        // All subtasks complete: suggest (never force) completing the parent.
+        if (mst.length && mst.every((x) => x.done)) {
+          const sel = root.querySelector('[name="status"]');
+          if (sel && sel.value !== "done" && confirm("All subtasks are complete.\n\nMark the task itself done?")) {
+            sel.value = "done";
+          }
+        }
+      };
+    });
+    $$("#m-subtasks [data-sttitle]").forEach((el) => {
+      el.onclick = () => {
+        const s = mst.find((x) => x.id === el.dataset.sttitle);
+        if (!s || el.querySelector("input")) return;
+        el.innerHTML = `<input class="st-edit" value="${esc(s.title)}">`;
+        const inp = el.querySelector("input");
+        inp.focus(); inp.select();
+        let done = false;
+        const finish = (save) => {
+          if (done) return; done = true;
+          if (save && inp.value.trim()) s.title = inp.value.trim().slice(0, 200);
+          drawSubtasks();
+        };
+        inp.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Enter") finish(true); else if (e.key === "Escape") finish(false); };
+        inp.onblur = () => finish(true);
+      };
+    });
+    $$("#m-subtasks [data-stdel]").forEach((el) => {
+      el.onclick = () => { mst = mst.filter((x) => x.id !== el.dataset.stdel); drawSubtasks(); };
+    });
+  };
+  drawSubtasks();
+  const stAdd = $("#m-st-add");
+  if (stAdd) stAdd.onclick = () => {
+    const inp = $("#m-st-new");
+    const v = inp.value.trim().slice(0, 200);
+    if (!v) return;
+    mst.push({ id: `st${Date.now().toString(36)}${Math.floor(Math.random() * 1e6)}`, title: v, done: false });
+    inp.value = "";
+    drawSubtasks();
+    inp.focus();
+  };
+  const stNew = $("#m-st-new");
+  if (stNew) stNew.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); stAdd.onclick(); }
   });
   if (del) del.onclick = async () => {
     if (!confirm(`Delete “${existing.title}”?`)) return;
@@ -1733,20 +2403,24 @@ function prereqBoxHtml(t) {
 /* ---------- router ---------- */
 async function route() {
   closeDrawer();
-  const h = location.hash || "#/overview";
+  const h = location.hash || "#/myday";
   const st = await GET("/api/status").catch(() => ({ paired: false, has_space: false }));
   if ((!st.paired || !st.has_space) && h !== "#/setup") { location.hash = "#/setup"; return; }
+  const psm = h.match(/^#\/sprints\/([^/]+)$/);
   const pm = h.match(/^#\/projects\/([^/]+)$/);
   const pw = h.match(/^#\/projects\/([^/]+)\/wiki$/);
   const ptable = h.match(/^#\/projects\/([^/]+)\/table$/);
   try {
     if (h === "#/setup") await vSetup();
+    else if (h === "#/myday") await vMyDay();
     else if (h === "#/overview") await vOverview();
     else if (h === "#/projects") await vProjects();
+    else if (h === "#/sprints") await vSprints();
+    else if (psm) await vSprintDetail(decodeURIComponent(psm[1]));
     else if (pw) { _pid = pw[1]; await vProjectDetail(pw[1], "wiki"); }
     else if (ptable) { _pid = ptable[1]; await vProjectDetail(ptable[1], "table"); }
     else if (pm) { _pid = pm[1]; await vProjectDetail(pm[1]); }
-    else location.hash = "#/overview";
+    else location.hash = "#/myday";
   } catch (e) {
     view.innerHTML = `<div class="empty"><span class="big">⚠</span>${esc(e.message)}</div>`;
   }
@@ -1762,7 +2436,17 @@ const drawerCloseBtn = $("#drawer-close");
 if (drawerCloseBtn) drawerCloseBtn.onclick = closeDrawer;
 if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
   window.addEventListener("keydown", (e) => { if (e && e.key === "Escape") closeDrawer(); });
+  window.addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key && e.key.toLowerCase() === "k") {
+      e.preventDefault();
+      if ($("#cmdk-root")) cmdkClose(); else openCmdK();
+    }
+  });
 }
+const quickAddBtn = $("#quick-add-btn");
+if (quickAddBtn) quickAddBtn.onclick = () => quickAddModal();
+const cmdkBtn = $("#cmdk-btn");
+if (cmdkBtn) cmdkBtn.onclick = () => openCmdK();
 initTheme();
 route();
 
@@ -1772,6 +2456,12 @@ globalThis.__test = { taskCard, duePill, fmtDate, COLUMNS, md, vOverview, vProje
   tblState: () => ({ sort: tblSort, query: tblQuery, collapsed: tblCollapsed }),
   tblSet: (s) => { if (s.sort) tblSort = s.sort; if (s.query !== undefined) tblQuery = s.query; if (s.collapsed) tblCollapsed = s.collapsed; },
   taskChildren, checkPrereqsDone, refreshTasks, nestPicker, openRowMenu, prereqBoxHtml,
+  vMyDay, vSprints, vSprintDetail, sprintModal, sprintStats, mydayRowHtml, openTaskInProject,
+  openCmdK, cmdkClose, cmdkSearch, cmdkRender, cmdkMove, cmdkActivate,
+  cmdkState: () => ({ items: cmdkItems, sel: cmdkSel }),
+  quickAddModal, taskMinutes, parseEstInput, estChipFor, blockedBadge, recurrenceBadge, subtaskBadge,
+  shakeCard, readRecurrence, blockerBoxHtml, recurrenceBoxHtml, subtaskBoxHtml, crossProjectTaskPicker,
+  setTaskDone,
   tblSaveCollapsed, tblLoadCollapsed,
   prereqBannedIds, tblNestRejectReason, moveTaskNesting,
   tblPtrDown, tblPtrMove, tblPtrUp, tblPtrKey, tblDragEnd, tblDragIdOf: () => tblDragId,
