@@ -198,6 +198,74 @@ describe("My Day view", () => {
   });
 });
 
+describe("My Day section folding", () => {
+  const mkTask = (id: string, title: string) => ({
+    id, project_id: "p1", project_name: "Acme", project_icon: "🚀", title,
+    status: "backlog", dueMs: today + 3600000, estimate_min: null,
+    blocked: false, blockers: [], recurrence: null, subtask_done: 0, subtask_total: 0,
+  });
+  const origToday = MYDAY.today.slice();
+  const sectionHtml = (html: string, key: string) => {
+    const start = html.indexOf(`id="myday-list-${key}"`);
+    const next = html.indexOf("myday-section", start + 10);
+    return html.slice(start, next === -1 ? undefined : next);
+  };
+  const countRows = (h: string) => (h.match(/class="card myday-row"/g) || []).length;
+
+  test("fold threshold constant is 4", () => {
+    expect(T.MYDAY_FOLD_AFTER).toBe(4);
+  });
+  test("section with 5 tasks renders 4 rows + expander with the remaining count", async () => {
+    MYDAY.today = [0, 1, 2, 3, 4].map((i) => mkTask("ft" + i, "Fold task " + i));
+    await T.vMyDay();
+    const html = document.getElementById("view").innerHTML;
+    const today = sectionHtml(html, "today");
+    expect(countRows(today)).toBe(4);
+    expect(today).toContain("Fold task 3");
+    expect(today).not.toContain("Fold task 4");
+    expect(html).toContain('id="myday-fold-today"');
+    expect(html).toContain("Show 1 more");
+    expect(html).toContain('aria-expanded="false"');
+  });
+  test("sections with 4 or fewer tasks render no expander", async () => {
+    const html = document.getElementById("view").innerHTML;
+    expect(html).not.toContain("myday-fold-overdue");
+    expect(html).not.toContain("myday-fold-in_progress");
+  });
+  test("toggling expands all rows and flips to Show less, then folds back", async () => {
+    T.mydayFoldToggle("today");
+    let html = document.getElementById("view").innerHTML;
+    expect(countRows(sectionHtml(html, "today"))).toBe(5);
+    expect(html).toContain("Fold task 4");
+    expect(html).toContain("Show less");
+    expect(html).toContain('aria-expanded="true"');
+    expect(T.mydayExpandedOf().today).toBe(true);
+    T.mydayFoldToggle("today");
+    html = document.getElementById("view").innerHTML;
+    expect(countRows(sectionHtml(html, "today"))).toBe(4);
+    expect(html).toContain("Show 1 more");
+    expect(html).toContain('aria-expanded="false"');
+    MYDAY.today = origToday; // restore canned data for later suites
+    await T.vMyDay();
+  });
+  test("sections expand independently", async () => {
+    MYDAY.today = [0, 1, 2, 3, 4].map((i) => mkTask("ft" + i, "Fold task " + i));
+    MYDAY.in_progress = [0, 1, 2, 3, 4, 5].map((i) => mkTask("fi" + i, "Prog task " + i));
+    await T.vMyDay();
+    T.mydayFoldToggle("today");
+    expect(T.mydayExpandedOf().today).toBe(true);
+    expect(T.mydayExpandedOf().in_progress).not.toBe(true);
+    const html = document.getElementById("view").innerHTML;
+    expect(countRows(sectionHtml(html, "today"))).toBe(5);
+    expect(countRows(sectionHtml(html, "in_progress"))).toBe(4);
+    expect(html).toContain("Show 2 more");
+    MYDAY.today = origToday;
+    MYDAY.in_progress = MYDAY.in_progress.slice(0, 1); // restore single canned task
+    T.mydayFoldToggle("today"); // reset expanded state
+    await T.vMyDay();
+  });
+});
+
 describe("Cmd+K palette", () => {
   test("opens with an input and empty-state hint", () => {
     T.openCmdK();

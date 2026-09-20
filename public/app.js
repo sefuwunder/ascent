@@ -431,6 +431,59 @@ function openTaskInProject(pid, tid) {
   else location.hash = h;
 }
 
+/* ---------- My Day: section folding ---------- */
+const MYDAY_FOLD_AFTER = 4; // fold a My Day section after this many rows
+const mydayExpanded = {};   // session-only: section key -> expanded
+let mydayData = null;
+
+function mydaySectionHtml(key, label, items) {
+  if (!items.length) return "";
+  const expanded = !!mydayExpanded[key];
+  const foldable = items.length > MYDAY_FOLD_AFTER;
+  const shown = (expanded || !foldable) ? items : items.slice(0, MYDAY_FOLD_AFTER);
+  const hidden = items.length - shown.length;
+  const btn = foldable
+    ? `<button class="btn btn-ghost btn-sm myday-fold" id="myday-fold-${key}" data-sec="${key}" aria-expanded="${expanded}" aria-controls="myday-list-${key}">${expanded ? "Show less" : `Show ${hidden} more`}</button>`
+    : "";
+  return `<div class="myday-section">
+    <div class="section-title">${label} <span class="col-count">${items.length}</span></div>
+    <div class="myday-list" id="myday-list-${key}">${shown.map(mydayRowHtml).join("")}</div>${btn}</div>`;
+}
+
+function renderMyDay() {
+  const d = mydayData;
+  if (!d) return;
+  const all = [...d.overdue, ...d.today, ...d.in_progress];
+  const byId = new Map(all.map((t) => [t.id, t]));
+  view.innerHTML = all.length
+    ? mydaySectionHtml("overdue", "Overdue", d.overdue)
+      + mydaySectionHtml("today", "Due today", d.today)
+      + mydaySectionHtml("in_progress", "In progress", d.in_progress)
+    : `<div class="card"><div class="empty"><span class="big">☀</span>Nothing due — your day is clear.<br><br><button class="btn btn-default" id="md-empty-add">Quick add a task</button></div></div>`;
+  $$(".myday-row").forEach((el) => {
+    const chk = el.querySelector(".task-check");
+    if (chk) chk.onclick = async (e) => {
+      e.stopPropagation();
+      const t = byId.get(el.dataset.mtid);
+      if (!t || t.status === "done") return;
+      try { const nt = await setTaskDone(t, true); if (nt) route(); }
+      catch (err) { toast(err.message, true); }
+    };
+    el.onclick = () => openTaskInProject(el.dataset.mpid, el.dataset.mtid);
+  });
+  $$(".myday-fold").forEach((b) => { b.onclick = () => mydayFoldToggle(b.dataset.sec); });
+  $("#md-quick").onclick = () => quickAddModal();
+  const ea = $("#md-empty-add");
+  if (ea) ea.onclick = () => quickAddModal();
+}
+
+function mydayFoldToggle(key) {
+  mydayExpanded[key] = !mydayExpanded[key];
+  renderMyDay();
+  const btn = $("#myday-fold-" + key); // keep focus on the toggled expander
+  if (btn && btn.focus) btn.focus();
+}
+
 function mydayRowHtml(t) {
   return `
     <div class="card myday-row" data-mpid="${esc(t.project_id)}" data-mtid="${esc(t.id)}">
@@ -454,30 +507,8 @@ async function vMyDay() {
   let d;
   try { d = await GET("/api/myday"); }
   catch (e) { view.innerHTML = `<div class="empty"><span class="big">⚠</span>${esc(e.message)}</div>`; return; }
-  const all = [...d.overdue, ...d.today, ...d.in_progress];
-  const byId = new Map(all.map((t) => [t.id, t]));
-  const sec = (label, items) => items.length ? `
-    <div class="section-title">${label} <span class="col-count">${items.length}</span></div>
-    <div class="myday-list">${items.map(mydayRowHtml).join("")}</div>` : "";
-  view.innerHTML = all.length ? `
-    ${sec("Overdue", d.overdue)}
-    ${sec("Due today", d.today)}
-    ${sec("In progress", d.in_progress)}`
-    : `<div class="card"><div class="empty"><span class="big">☀</span>Nothing due — your day is clear.<br><br><button class="btn btn-default" id="md-empty-add">Quick add a task</button></div></div>`;
-  $$(".myday-row").forEach((el) => {
-    const chk = el.querySelector(".task-check");
-    if (chk) chk.onclick = async (e) => {
-      e.stopPropagation();
-      const t = byId.get(el.dataset.mtid);
-      if (!t || t.status === "done") return;
-      try { const nt = await setTaskDone(t, true); if (nt) route(); }
-      catch (err) { toast(err.message, true); }
-    };
-    el.onclick = () => openTaskInProject(el.dataset.mpid, el.dataset.mtid);
-  });
-  $("#md-quick").onclick = () => quickAddModal();
-  const ea = $("#md-empty-add");
-  if (ea) ea.onclick = () => quickAddModal();
+  mydayData = d;
+  renderMyDay();
 }
 
 /* ---------- Cmd+K command palette ---------- */
@@ -2457,6 +2488,7 @@ globalThis.__test = { taskCard, duePill, fmtDate, COLUMNS, md, vOverview, vProje
   tblSet: (s) => { if (s.sort) tblSort = s.sort; if (s.query !== undefined) tblQuery = s.query; if (s.collapsed) tblCollapsed = s.collapsed; },
   taskChildren, checkPrereqsDone, refreshTasks, nestPicker, openRowMenu, prereqBoxHtml,
   vMyDay, vSprints, vSprintDetail, sprintModal, sprintStats, mydayRowHtml, openTaskInProject,
+  mydayFoldToggle, mydayExpandedOf: () => mydayExpanded, MYDAY_FOLD_AFTER,
   openCmdK, cmdkClose, cmdkSearch, cmdkRender, cmdkMove, cmdkActivate,
   cmdkState: () => ({ items: cmdkItems, sel: cmdkSel }),
   quickAddModal, taskMinutes, parseEstInput, estChipFor, blockedBadge, recurrenceBadge, subtaskBadge,
