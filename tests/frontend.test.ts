@@ -330,6 +330,72 @@ describe("quick-add modal", () => {
   });
 });
 
+describe("projects page: Projects | Sprints tabs", () => {
+  test("main menu has no Sprints item", () => {
+    const indexHtml = readFileSync(new URL("../public/index.html", import.meta.url).pathname, "utf8");
+    expect(indexHtml).not.toContain('data-nav="sprints"');
+    expect(indexHtml).toContain('data-nav="projects"');
+  });
+  test("projects page defaults to the Projects tab with the switcher", async () => {
+    T.projectsTabSet("projects");
+    location.hash = "#/projects";
+    await T.vProjects();
+    const html = document.getElementById("view").innerHTML;
+    expect(html).toContain('id="pj-tab-projects"');
+    expect(html).toContain('id="pj-tab-sprints"');
+    expect(html).toContain('class="proj-grid"');
+    expect(html).toContain("Acme");
+    expect(html).not.toContain("Sprint 1");
+    expect(html).toMatch(/aria-selected="true" id="pj-tab-projects"/);
+    expect(document.getElementById("topbar-actions").innerHTML).toContain('id="pj-new"');
+    expect(document.getElementById("topbar-actions").innerHTML).toContain('id="pj-import"');
+  });
+  test("?sprints deep-link shows the sprint list + New sprint button", async () => {
+    location.hash = "#/projects?sprints";
+    await T.vProjects();
+    const html = document.getElementById("view").innerHTML;
+    expect(html).toContain("Sprint 1");
+    expect(document.getElementById("topbar-actions").innerHTML).toContain('id="sp-new"');
+    expect(html).not.toContain('class="proj-grid"');
+    expect(html).toMatch(/aria-selected="true" id="pj-tab-sprints"/);
+    expect(T.projectsTabGet()).toBe("sprints");
+  });
+  test("plain #/projects restores the last-visited tab", async () => {
+    location.hash = "#/projects";
+    await T.vProjects();
+    expect(document.getElementById("view").innerHTML).toContain("Sprint 1"); // sprints was last
+    T.setProjectsTab("projects");
+    expect(location.hash).toBe("#/projects");
+    expect(T.projectsTabGet()).toBe("projects");
+    await T.vProjects();
+    expect(document.getElementById("view").innerHTML).toContain('class="proj-grid"');
+  });
+  test("New sprint button opens the same create dialog as before", async () => {
+    location.hash = "#/projects?sprints";
+    await T.vProjects();
+    document.getElementById("sp-new").onclick();
+    const html = document.getElementById("modal-root").innerHTML;
+    expect(html).toContain("New sprint");
+    expect(html).toContain('name="start"');
+    expect(html).toContain('name="end"');
+  });
+  test("sprint detail still renders; back link returns to the Sprints tab", async () => {
+    await T.vSprintDetail("sp1");
+    const html = document.getElementById("view").innerHTML;
+    expect(html).toContain("Sprint velocity");
+    expect(document.getElementById("topbar-actions").innerHTML).toContain('href="#/projects?sprints"');
+    T.setProjectsTab("projects"); // leave state clean
+    location.hash = "#/projects";
+  });
+  test("legacy #/sprints route redirects to the Sprints tab", async () => {
+    location.hash = "#/sprints";
+    await T.route();
+    expect(location.hash).toBe("#/projects?sprints");
+    T.setProjectsTab("projects");
+    location.hash = "#/projects";
+  });
+});
+
 describe("sprints", () => {
   test("sprintStats computes velocity math", () => {
     const s = T.sprintStats(SPRINT_DETAIL.tasks);

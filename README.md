@@ -149,7 +149,7 @@ The task modal's **Repeats** section sets daily, weekly (on selected weekdays), 
 
 Every task modal has a **Subtasks** section: add, rename, delete, and toggle checklist items. Cards and My Day rows show a compact `✓ n/m` progress pill; completing a task with unfinished subtasks offers a one-tap **complete-them-all** confirmation.
 
-### Sprints (`#/sprints`)
+### Sprints (Projects page → Sprints tab)
 
 Time-boxed focus lists across projects. A sprint has a name, a **Monday–Sunday range** (defaults to the current week), and an explicit task list — add tasks from any project via the cross-project picker, remove them without touching the tasks themselves.
 

@@ -680,16 +680,40 @@ function sprintStats(tasks) {
   };
 }
 
-async function vSprints() {
-  const st = await GET("/api/status").catch(() => ({}));
-  showChrome(true, st.space_name || "");
-  setNav("sprints");
-  setTitle("Sprints", "Time-boxed focus");
-  setActions(`<button class="btn btn-default" id="sp-new">+ New sprint</button>`);
-  view.innerHTML = `<div class="skeleton" style="height:120px"></div>`;
+/* ---------- projects page: Projects | Sprints tabs ---------- */
+const PROJECTS_TAB_KEY = "ascent.projectsTab";
+function projectsTabGet() {
+  try { return localStorage.getItem(PROJECTS_TAB_KEY) === "sprints" ? "sprints" : "projects"; }
+  catch (e) { return "projects"; }
+}
+function projectsTabSet(tab) {
+  try { localStorage.setItem(PROJECTS_TAB_KEY, tab === "sprints" ? "sprints" : "projects"); } catch (e) {}
+}
+// Explicit ?sprints deep-link wins; otherwise restore the tab the user left.
+function projectsTabOf() { return location.hash.indexOf("?sprints") !== -1 ? "sprints" : projectsTabGet(); }
+
+function setProjectsTab(tab) {
+  projectsTabSet(tab);
+  const h = tab === "sprints" ? "#/projects?sprints" : "#/projects";
+  if (location.hash === h) route(); else location.hash = h;
+}
+
+function projectsTabsHtml(tab) {
+  return `<div class="tabs-list" role="tablist" aria-label="Projects or sprints">
+    <button class="tabs-trigger ${tab === "projects" ? "on" : ""}" role="tab" aria-selected="${tab === "projects"}" id="pj-tab-projects">▦ Projects</button>
+    <button class="tabs-trigger ${tab === "sprints" ? "on" : ""}" role="tab" aria-selected="${tab === "sprints"}" id="pj-tab-sprints">🏁 Sprints</button>
+  </div>`;
+}
+function bindProjectsTabs() {
+  const pt = $("#pj-tab-projects"), st = $("#pj-tab-sprints");
+  if (pt) pt.onclick = () => setProjectsTab("projects");
+  if (st) st.onclick = () => setProjectsTab("sprints");
+}
+
+async function sprintListHtml() {
   let d;
   try { d = await GET("/api/sprints"); }
-  catch (e) { view.innerHTML = `<div class="empty"><span class="big">⚠</span>${esc(e.message)}</div>`; return; }
+  catch (e) { return `<div class="empty"><span class="big">⚠</span>${esc(e.message)}</div>`; }
   const card = (s) => `
     <div class="card sprint-card" data-sprint="${esc(s.id)}">
       <div style="display:flex;align-items:center;gap:10px">
@@ -698,12 +722,27 @@ async function vSprints() {
         <span class="badge ${s.status === "open" ? "badge-default" : "badge-secondary"}">${esc(s.status)}</span>
       </div>
     </div>`;
-  view.innerHTML = `
+  return `
     ${d.open.length ? `<div class="section-title">Open</div><div class="sprint-grid">${d.open.map(card).join("")}</div>` : ""}
     ${d.closed.length ? `<div class="section-title">Archived</div><div class="sprint-grid">${d.closed.map(card).join("")}</div>` : ""}
     ${!d.open.length && !d.closed.length ? `<div class="card"><div class="empty"><span class="big">🏁</span>No sprints yet — time-box your next week of work.</div></div>` : ""}`;
+}
+function bindSprintList() {
   $$("[data-sprint]").forEach((el) => { el.onclick = () => { location.hash = `#/sprints/${el.dataset.sprint}`; }; });
-  $("#sp-new").onclick = () => sprintModal();
+  const b = $("#sp-new");
+  if (b) b.onclick = () => sprintModal();
+}
+
+// Standalone sprint-list render (kept for tests); the app now reaches this via the Projects page Sprints tab.
+async function vSprints() {
+  const st = await GET("/api/status").catch(() => ({}));
+  showChrome(true, st.space_name || "");
+  setNav("projects");
+  setTitle("Sprints", "Time-boxed focus");
+  setActions(`<button class="btn btn-default" id="sp-new">+ New sprint</button>`);
+  view.innerHTML = `<div class="skeleton" style="height:120px"></div>`;
+  view.innerHTML = await sprintListHtml();
+  bindSprintList();
 }
 
 function sprintModal(existing) {
@@ -732,11 +771,11 @@ function sprintModal(existing) {
 async function vSprintDetail(id) {
   const st = await GET("/api/status").catch(() => ({}));
   showChrome(true, st.space_name || "");
-  setNav("sprints");
+  setNav("projects");
   view.innerHTML = `<div class="empty"><span class="big">◌</span>Loading sprint…</div>`;
   let d;
   try { d = await GET(`/api/sprints/${id}`); }
-  catch (e) { view.innerHTML = `<div class="empty"><span class="big">⚠</span>${esc(e.message)}<br><br><a class="btn btn-outline" href="#/sprints">Back to sprints</a></div>`; return; }
+  catch (e) { view.innerHTML = `<div class="empty"><span class="big">⚠</span>${esc(e.message)}<br><br><a class="btn btn-outline" href="#/projects?sprints">Back to sprints</a></div>`; return; }
   const s = d.sprint;
   const stats = sprintStats(d.tasks);
   setTitle(s.name, `${s.start} → ${s.end}`);
@@ -744,7 +783,7 @@ async function vSprintDetail(id) {
     ${s.status === "open" ? `<button class="btn btn-outline btn-sm" id="sd-add">+ Add tasks</button>
     <button class="btn btn-outline btn-sm" id="sd-edit">Edit</button>
     <button class="btn btn-default btn-sm" id="sd-close">Close sprint</button>` : ""}
-    <a class="btn btn-ghost btn-sm" href="#/sprints">Back</a>`);
+    <a class="btn btn-ghost btn-sm" href="#/projects?sprints">Back</a>`);
   const cols = COLUMNS.map(([key, label]) => {
     const items = d.tasks.filter((t) => t.status === key);
     return `<div class="kanban-col"><div class="col-head">${label}<span class="col-count">${items.length}</span></div>
@@ -794,14 +833,26 @@ async function vProjects() {
   const st = await GET("/api/status").catch(() => ({}));
   showChrome(true, st.space_name || "");
   setNav("projects");
+  const tab = projectsTabOf();
+  projectsTabSet(tab); // remember the tab the user left
   setTitle("Projects", `${st.space_name || ""}`);
+  if (tab === "sprints") {
+    setActions(`<button class="btn btn-default" id="sp-new">+ New sprint</button>`);
+    view.innerHTML = `${projectsTabsHtml(tab)}<div class="skeleton" style="height:120px"></div>`;
+    bindProjectsTabs();
+    view.innerHTML = `${projectsTabsHtml(tab)}${await sprintListHtml()}`;
+    bindProjectsTabs();
+    bindSprintList();
+    return;
+  }
   setActions(`<button class="btn btn-outline" id="pj-import">⇪ Import</button> <button class="btn btn-default" id="pj-new">+ New project</button>`);
-  view.innerHTML = `<div style="display:grid;gap:16px;grid-template-columns:repeat(auto-fill,minmax(280px,1fr))"><div class="skeleton" style="height:168px"></div><div class="skeleton" style="height:168px"></div><div class="skeleton" style="height:168px"></div></div>`;
+  view.innerHTML = `${projectsTabsHtml(tab)}<div style="display:grid;gap:16px;grid-template-columns:repeat(auto-fill,minmax(280px,1fr))"><div class="skeleton" style="height:168px"></div><div class="skeleton" style="height:168px"></div><div class="skeleton" style="height:168px"></div></div>`;
+  bindProjectsTabs();
   let d;
   try { d = await GET("/api/projects"); }
-  catch (e) { view.innerHTML = `<div class="empty"><span class="big">⚠</span>${esc(e.message)}</div>`; return; }
+  catch (e) { view.innerHTML = `${projectsTabsHtml(tab)}<div class="empty"><span class="big">⚠</span>${esc(e.message)}</div>`; bindProjectsTabs(); return; }
   const taskMap = await fetchProjectTasks(d.projects);
-  view.innerHTML = d.projects.length ? `
+  view.innerHTML = `${projectsTabsHtml(tab)}` + (d.projects.length ? `
     <div class="proj-grid">
       ${d.projects.map((p) => {
         const est = projectRemainingEst(taskMap[p.id]);
@@ -819,7 +870,8 @@ async function vProjects() {
         </div>`;
       }).join("")}
     </div>`
-    : `<div class="card"><div class="empty"><span class="big">▦</span>No projects yet — create one to get started.</div></div>`;
+    : `<div class="card"><div class="empty"><span class="big">▦</span>No projects yet — create one to get started.</div></div>`);
+  bindProjectsTabs();
   $$("[data-goto]").forEach((el) => { el.onclick = () => { location.hash = `#/projects/${el.dataset.goto}`; }; });
   $("#pj-new").onclick = () => projectModal();
   $("#pj-import").onclick = () => importModal("page");
@@ -2445,8 +2497,8 @@ async function route() {
     if (h === "#/setup") await vSetup();
     else if (h === "#/myday") await vMyDay();
     else if (h === "#/overview") await vOverview();
-    else if (h === "#/projects") await vProjects();
-    else if (h === "#/sprints") await vSprints();
+    else if (h === "#/projects" || h === "#/projects?sprints") await vProjects();
+    else if (h === "#/sprints") { location.hash = "#/projects?sprints"; return; } // legacy bookmark redirect
     else if (psm) await vSprintDetail(decodeURIComponent(psm[1]));
     else if (pw) { _pid = pw[1]; await vProjectDetail(pw[1], "wiki"); }
     else if (ptable) { _pid = ptable[1]; await vProjectDetail(ptable[1], "table"); }
@@ -2488,6 +2540,7 @@ globalThis.__test = { taskCard, duePill, fmtDate, COLUMNS, md, vOverview, vProje
   tblSet: (s) => { if (s.sort) tblSort = s.sort; if (s.query !== undefined) tblQuery = s.query; if (s.collapsed) tblCollapsed = s.collapsed; },
   taskChildren, checkPrereqsDone, refreshTasks, nestPicker, openRowMenu, prereqBoxHtml,
   vMyDay, vSprints, vSprintDetail, sprintModal, sprintStats, mydayRowHtml, openTaskInProject,
+  projectsTabGet, projectsTabSet, projectsTabOf, setProjectsTab, projectsTabsHtml, sprintListHtml, bindSprintList,
   mydayFoldToggle, mydayExpandedOf: () => mydayExpanded, MYDAY_FOLD_AFTER,
   openCmdK, cmdkClose, cmdkSearch, cmdkRender, cmdkMove, cmdkActivate,
   cmdkState: () => ({ items: cmdkItems, sel: cmdkSel }),
