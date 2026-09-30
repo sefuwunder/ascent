@@ -18,6 +18,11 @@ import {
 import {
   ImapError, validateImap, fetchStarred,
 } from "./imap";
+import {
+  parseQuickAdd, nextRecurrenceDate, groupMyDay, subtaskProgress,
+  wouldBlockCycle, thisWeekRange, isoDay as libIsoDay,
+  type Recurrence, type Subtask,
+} from "./lib";
 
 const PORT = Number(process.env.PORT || 3004);
 const DATA = new URL("../data/", import.meta.url).pathname;
@@ -30,9 +35,28 @@ interface Config {
   space_name: string;
   task_keys: TaskKeys;
 }
-interface TaskLink { project_id: string; status: string; source: "ascent" | "imported"; parent_id?: string }
+interface TaskLink {
+  project_id: string;
+  status: string;
+  source: "ascent" | "imported";
+  parent_id?: string;
+  blocked_by?: string[];        // task ids that must complete first (same or cross-project)
+  recurrence?: Recurrence;      // when set, completing spawns the next instance
+  subtasks?: Subtask[];         // checklist; Ascent-only, never synced to ClickUp
+  estimate_min?: number;        // explicit estimate override (quick-add); Ascent-only
+}
 interface ProjectLink { id: string; source: "ascent" | "imported"; added_at: string }
 interface WikiLink { project_id: string; source: "ascent" | "imported"; added_at: string }
+interface SprintLink {
+  id: string;
+  name: string;
+  start: string;   // YYYY-MM-DD
+  end: string;     // YYYY-MM-DD
+  task_ids: string[];
+  status: "open" | "closed";
+  created_at: string;
+  closed_at?: string;
+}
 // ClickUp integration state: the Personal API token (server-side only), the
 // clickup task id → Anytype task id dedupe map (survives disconnects), the
 // per-project list bindings for two-way sync, and the per-task sync snapshots
@@ -64,7 +88,14 @@ interface EmailState {
   project_id: string;
   uids: Record<string, string>;
 }
-interface Links { projects: ProjectLink[]; tasks: Record<string, TaskLink>; wiki: Record<string, WikiLink>; clickup: ClickUpState; email: EmailState }
+interface Links {
+  projects: ProjectLink[];
+  tasks: Record<string, TaskLink>;
+  wiki: Record<string, WikiLink>;
+  clickup: ClickUpState;
+  email: EmailState;
+  sprints: SprintLink[];
+}
 
 function loadJson<T>(path: string, fallback: T): T {
   try {
@@ -79,7 +110,7 @@ function saveJson(path: string, v: unknown) {
 }
 
 let config: Config = loadJson<Config>(CONFIG_PATH, { api_key: "", space_id: "", space_name: "", task_keys: { done: "done", due: "due_date" } });
-let links: Links = loadJson<Links>(LINKS_PATH, { projects: [], tasks: {}, wiki: {}, clickup: { token: "", tasks: {}, bindings: {}, sync: {} }, email: { host: "", port: 993, user: "", pass: "", project_id: "", uids: {} } });
+let links: Links = loadJson<Links>(LINKS_PATH, { projects: [], tasks: {}, wiki: {}, clickup: { token: "", tasks: {}, bindings: {}, sync: {} }, email: { host: "", port: 993, user: "", pass: "", project_id: "", uids: {} }, sprints: [] });
 if (config.api_key) setApiKey(config.api_key);
 
 const saveConfig = () => saveJson(CONFIG_PATH, config);
@@ -89,6 +120,7 @@ if (!links.clickup) { links.clickup = { token: "", tasks: {}, bindings: {}, sync
 if (!links.clickup.bindings) { links.clickup.bindings = {}; saveLinks(); } // upgrade path for pre-sync stores
 if (!links.clickup.sync) { links.clickup.sync = {}; saveLinks(); } // upgrade path for pre-sync stores
 if (!links.email) { links.email = { host: "", port: 993, user: "", pass: "", project_id: "", uids: {} }; saveLinks(); } // upgrade path for pre-email link indexes
+if (!links.sprints) { links.sprints = []; saveLinks(); } // upgrade path for pre-sprint link indexes
 
 const STATUSES = ["backlog", "in_progress", "review", "done"] as const;
 
@@ -129,6 +161,7 @@ function atErr(e: unknown): Response {
   }
   if (e instanceof AnytypeError) {
     if (e.status === 0) return json({ error: e.message }, 502);
+    if (e.status === 400) return json({ error: e.message }, 400);
     if (e.status === 401 || e.status === 403)
       return json({ error: "Anytype rejected the API key — pair again" }, 401);
     if (e.status === 404) return json({ error: "not found in Anytype" }, 404);
@@ -191,6 +224,35 @@ async function tasksFor(projectId: string): Promise<any[]> {
     const l = links.tasks[t.id];
     t.parent_id = l && l.parent_id ? l.parent_id : null;
     t.child_count = childCount[t.id] || 0;
+    t.blocked_by = l && Array.isArray(l.blocked_by) ? l.blocked_by.filter((id) => links.tasks[id]) : [];
+    t.recurrence = l && l.recurrence ? l.recurrence : null;
+    t.subtasks = l && Array.isArray(l.subtasks) ? l.subtasks : [];
+    t.estimate_min = l && typeof l.estimate_min === "number" ? l.estimate_min : null;
+    const sp = subtaskProgress(t.subtasks);
+    t.subtask_done = sp.done;
+    t.subtask_total = sp.total;
+  }
+  // Resolve blocker titles/statuses (same-project from `out`, cross-project
+  // via a best-effort Anytype read). A task is blocked while any blocker
+  // isn't done; unblocking is automatic the moment the blocker completes.
+  const byId = new Map(out.map((t) => [t.id, t]));
+  for (const t of out) {
+    const blockers: Array<{ id: string; title: string; status: string }> = [];
+    for (const bid of t.blocked_by) {
+      const local = byId.get(bid);
+      if (local) {
+        blockers.push({ id: bid, title: local.title, status: local.status });
+        continue;
+      }
+      try {
+        const o = await getObject(config.space_id, bid);
+        const tv = toTaskView(o, config.task_keys);
+        const bl = links.tasks[bid];
+        blockers.push({ id: bid, title: tv.title, status: effectiveStatus(tv.done, bl) });
+      } catch { /* blocker unreadable — treated as not blocking */ }
+    }
+    t.blockers = blockers;
+    t.blocked = blockers.some((b) => b.status !== "done");
   }
   out.sort((a, b) => (a.dueMs || Infinity) - (b.dueMs || Infinity) || b.updatedMs - a.updatedMs);
   return out;
@@ -242,6 +304,7 @@ async function createLinkedTask(
   pid: string,
   draft: { title: string; notes?: string; due_date?: string; status?: string },
   source: "ascent" | "imported",
+  extra?: { estimate_min?: number | null; recurrence?: Recurrence | null; subtasks?: Subtask[] },
 ) {
   const status = STATUSES.includes(draft.status as any) ? (draft.status as any) : "backlog";
   const props: Array<Record<string, any>> = [{ key: config.task_keys.done, checkbox: status === "done" }];
@@ -253,16 +316,30 @@ async function createLinkedTask(
     properties: props,
   });
   const tv = toTaskView(o, config.task_keys);
-  links.tasks[tv.id] = { project_id: pid, status, source };
+  const link: TaskLink = { project_id: pid, status, source };
+  if (extra?.estimate_min) link.estimate_min = extra.estimate_min;
+  if (extra?.recurrence) link.recurrence = extra.recurrence;
+  if (extra?.subtasks?.length) link.subtasks = extra.subtasks;
+  links.tasks[tv.id] = link;
   saveLinks();
   return { ...tv, status: effectiveStatus(tv.done, links.tasks[tv.id]), source };
 }
 
 // Apply a partial update to a tracked task — shared by the manual task PATCH
 // endpoint and the sync pull path so both go through identical semantics.
+//
+// Blocking semantics: a task with incomplete blockers cannot be marked done
+// without `confirm: true`; without it the update is rejected with 409 and
+// the blocker names. Recurrence: when a recurring task transitions to done,
+// the next instance is spawned immediately (due date advanced from the
+// completion date, so past-due recurrences never pile up).
 async function applyTaskUpdate(
   tid: string,
-  b: { title?: string; notes?: string; due_date?: string; status?: string; done?: boolean },
+  b: {
+    title?: string; notes?: string; due_date?: string; status?: string; done?: boolean;
+    blocked_by?: string[]; recurrence?: Recurrence | null; subtasks?: Subtask[];
+    estimate_min?: number | null; confirm?: boolean;
+  },
 ) {
   const link = links.tasks[tid];
   if (!link) throw new AnytypeError(404, "task not tracked");
@@ -270,6 +347,7 @@ async function applyTaskUpdate(
   const props: Array<Record<string, any>> = [];
   if (b.title !== undefined) patch.name = b.title;
   if (b.notes !== undefined) patch.markdown = b.notes;
+  const wasDone = link.status === "done";
   let newStatus = link.status;
   if (b.done !== undefined || b.status !== undefined) {
     const wantDone = b.done !== undefined ? !!b.done : b.status === "done";
@@ -278,17 +356,99 @@ async function applyTaskUpdate(
     else newStatus = wantDone ? "done" : link.status === "done" ? "in_progress" : link.status;
     if (wantDone) newStatus = "done";
   }
+  if (newStatus === "done" && !wasDone) {
+    // Blocked-completion guard: completing a blocked task needs explicit
+    // confirmation. The client refuses the drop with a shake+toast first;
+    // this is the authoritative server-side enforcement. Blocker titles
+    // are hydrated from the live Anytype read so the 409 names real tasks.
+    const details = await blockerDetails(link);
+    const blockers = details.filter((d) => d.status !== "done");
+    if (blockers.length && !b.confirm) {
+      const err: any = new AnytypeError(409, `blocked by ${blockers.map((x) => `“${x.title}”`).join(", ")}`);
+      err.needs_confirm = true;
+      err.blockers = blockers.map((x) => ({ id: x.id, title: x.title }));
+      throw err;
+    }
+  }
   if (b.due_date !== undefined) {
     props.push(b.due_date
       ? { key: config.task_keys.due, date: b.due_date }
       : { key: config.task_keys.due, date: "" });
   }
+  if (b.blocked_by !== undefined) {
+    const ids = Array.isArray(b.blocked_by) ? b.blocked_by.map((x) => String(x)) : [];
+    for (const id of ids) {
+      if (!links.tasks[id]) throw new AnytypeError(400, "blocker task not tracked");
+      if (wouldBlockCycle(tid, id, (x) => links.tasks[x]?.blocked_by)) {
+        throw new AnytypeError(400, "that dependency would create a cycle");
+      }
+    }
+    link.blocked_by = [...new Set(ids)];
+  }
+  if (b.recurrence !== undefined) {
+    const r = b.recurrence;
+    link.recurrence = r && (r.kind === "daily" || r.kind === "weekly" || r.kind === "monthly")
+      ? { kind: r.kind, ...(r.kind === "weekly" && Array.isArray(r.weekdays) ? { weekdays: r.weekdays.filter((d) => d >= 0 && d <= 6) } : {}) }
+      : undefined;
+  }
+  if (b.subtasks !== undefined) {
+    link.subtasks = (Array.isArray(b.subtasks) ? b.subtasks : []).map((s) => ({
+      id: String(s.id || `st${Date.now().toString(36)}${Math.floor(Math.random() * 1e6)}`),
+      title: String(s.title || "").slice(0, 200),
+      done: !!s.done,
+    }));
+  }
+  if (b.estimate_min !== undefined) {
+    link.estimate_min = b.estimate_min && Number(b.estimate_min) > 0 ? Math.round(Number(b.estimate_min)) : undefined;
+  }
   if (props.length) patch.properties = props;
   if (Object.keys(patch).length) await updateObject(config.space_id, tid, patch);
   links.tasks[tid] = { ...link, status: newStatus };
   saveLinks();
+
+  // Recurrence: completing an instance spawns the next one, due date
+  // advanced from the completion date. Subtasks carry over unchecked.
+  let nextInstance: any = null;
+  if (newStatus === "done" && !wasDone && link.recurrence) {
+    const dueMs = nextRecurrenceDate(link.recurrence, Date.now());
+    let curTitle = "Untitled task";
+    let curNotes: string | undefined;
+    try {
+      const cur = toTaskView(await getObject(config.space_id, tid), config.task_keys);
+      curTitle = patch.name !== undefined ? String(patch.name) : cur.title;
+      curNotes = patch.markdown !== undefined ? String(patch.markdown) : cur.notes || undefined;
+    } catch { /* fall back to the patched name */ curTitle = patch.name !== undefined ? String(patch.name) : curTitle; }
+    nextInstance = await createLinkedTask(
+      link.project_id,
+      { title: curTitle, notes: curNotes, due_date: libIsoDay(dueMs), status: "backlog" },
+      link.source,
+      {
+        estimate_min: link.estimate_min,
+        recurrence: link.recurrence,
+        subtasks: (link.subtasks || []).map((s) => ({ id: `st${Date.now().toString(36)}${Math.floor(Math.random() * 1e6)}`, title: s.title, done: false })),
+      },
+    );
+  }
+
   const tv2 = toTaskView(await getObject(config.space_id, tid), config.task_keys);
-  return { ...tv2, status: effectiveStatus(tv2.done, links.tasks[tid]), source: link.source };
+  return { ...tv2, status: effectiveStatus(tv2.done, links.tasks[tid]), source: link.source, ...(nextInstance ? { next_instance: nextInstance } : {}) };
+}
+
+// Blocker details for a task's current link: real titles hydrated from the
+// live Anytype read (async so the 409 guard can name the actual blockers),
+// with status from the local link index.
+async function blockerDetails(link: TaskLink): Promise<Array<{ id: string; title: string; status: string }>> {
+  const out: Array<{ id: string; title: string; status: string }> = [];
+  for (const id of link.blocked_by || []) {
+    const l = links.tasks[id];
+    if (!l) continue;
+    let title = "Untitled task";
+    try {
+      title = toTaskView(await getObject(config.space_id, id), config.task_keys).title || title;
+    } catch { /* keep fallback title */ }
+    out.push({ id, title, status: l.status });
+  }
+  return out;
 }
 
 const server = Bun.serve({
@@ -350,7 +510,7 @@ const server = Bun.serve({
       }
       if (path === "/api/disconnect" && method === "POST") {
         config = { api_key: "", space_id: "", space_name: "", task_keys: { done: "done", due: "due_date" } };
-        links = { projects: [], tasks: {}, wiki: {}, clickup: { token: "", tasks: {}, bindings: {}, sync: {} }, email: { host: "", port: 993, user: "", pass: "", project_id: "", uids: {} } };
+        links = { projects: [], tasks: {}, wiki: {}, clickup: { token: "", tasks: {}, bindings: {}, sync: {} }, email: { host: "", port: 993, user: "", pass: "", project_id: "", uids: {} }, sprints: [] };
         setApiKey("");
         saveConfig();
         saveLinks();
@@ -546,7 +706,16 @@ const server = Bun.serve({
           const gate = needSpace();
           if (gate) return gate;
           const b = await readBody(req);
-          return json({ task: await applyTaskUpdate(tid, b) });
+          try {
+            return json({ task: await applyTaskUpdate(tid, b) });
+          } catch (e: any) {
+            // Blocked-completion guard: 409 names the blockers so the client
+            // can ask for explicit confirmation and retry with confirm:true.
+            if (e && e.needs_confirm) {
+              return json({ error: e.message, needs_confirm: true, blockers: e.blockers || [] }, 409);
+            }
+            throw e;
+          }
         }
         if (method === "DELETE") {
           const gate = needSpace();
@@ -558,6 +727,13 @@ const server = Bun.serve({
           // Deleting a parent unnests (never deletes) its children.
           for (const [cid, l] of Object.entries(links.tasks)) {
             if (l.parent_id === tid) links.tasks[cid] = { ...l, parent_id: undefined };
+          }
+          // A deleted task stops blocking anything, and leaves any sprints.
+          for (const l of Object.values(links.tasks)) {
+            if (l.blocked_by?.includes(tid)) l.blocked_by = l.blocked_by.filter((x) => x !== tid);
+          }
+          for (const s of links.sprints) {
+            if (s.task_ids.includes(tid)) s.task_ids = s.task_ids.filter((x) => x !== tid);
           }
           saveLinks();
           return json({ ok: true });
@@ -583,6 +759,227 @@ const server = Bun.serve({
         links.tasks[tid] = { ...link, parent_id: np || undefined };
         saveLinks();
         return json({ ok: true, parent_id: np });
+      }
+
+      // ---------- My Day: cross-project overdue / due-today / in-progress ----------
+      if (path === "/api/myday" && method === "GET") {
+        const gate = needSpace();
+        if (gate) return gate;
+        const items: any[] = [];
+        for (const pl of links.projects) {
+          const p = await hydrateProject(pl);
+          if (!p) continue;
+          const tasks = await tasksFor(pl.id);
+          for (const t of tasks) {
+            items.push({ ...t, project_id: pl.id, project_name: p.name, project_icon: p.icon });
+          }
+        }
+        const g = groupMyDay(items);
+        return json({ overdue: g.overdue, today: g.today, in_progress: g.in_progress });
+      }
+
+      // ---------- global search (Cmd+K palette) ----------
+      if (path === "/api/quicksearch" && method === "GET") {
+        const gate = needSpace();
+        if (gate) return gate;
+        const q = (url.searchParams.get("q") || "").toLowerCase().trim();
+        if (!q) return json({ tasks: [], projects: [], articles: [] });
+        const tasks: any[] = [];
+        const projects: any[] = [];
+        for (const pl of links.projects) {
+          const p = await hydrateProject(pl);
+          if (!p) continue;
+          if (p.name.toLowerCase().includes(q) && projects.length < 8) {
+            projects.push({ id: pl.id, name: p.name, icon: p.icon, kind: "project" });
+          }
+          const ts = await tasksFor(pl.id);
+          for (const t of ts) {
+            if (tasks.length >= 12) break;
+            if (String(t.title).toLowerCase().includes(q)) {
+              tasks.push({ ...t, project_id: pl.id, project_name: p.name, kind: "task" });
+            }
+          }
+        }
+        const articles: any[] = [];
+        for (const pl of links.projects) {
+          if (articles.length >= 8) break;
+          const p = await hydrateProject(pl);
+          if (!p) continue;
+          for (const a of await wikiFor(pl.id)) {
+            if (articles.length >= 8) break;
+            if (String(a.title).toLowerCase().includes(q)) {
+              articles.push({ ...a, project_id: pl.id, project_name: p.name, kind: "article" });
+            }
+          }
+        }
+        return json({ tasks, projects, articles });
+      }
+
+      // ---------- quick-add: natural-language task creation ----------
+      if (path === "/api/quick-add/parse" && method === "POST") {
+        const b = await readBody(req);
+        return json(parseQuickAdd(String(b.text || "")));
+      }
+      if (path === "/api/quick-add" && method === "POST") {
+        const gate = needSpace();
+        if (gate) return gate;
+        const b = await readBody(req);
+        const pid = String(b.project_id || "");
+        if (!links.projects.some((p) => p.id === pid)) return json({ error: "project not tracked" }, 404);
+        const parsed = parseQuickAdd(String(b.text || b.title || ""));
+        if (!parsed.title) return json({ error: "task title is required" }, 400);
+        const due = b.due !== undefined ? String(b.due || "") : parsed.dueISO;
+        const est = b.estimate_min !== undefined && b.estimate_min !== null && b.estimate_min !== ""
+          ? Math.round(Number(b.estimate_min)) || null
+          : parsed.estimateMin;
+        const task = await createLinkedTask(
+          pid,
+          { title: parsed.title, notes: b.notes || "", due_date: due, status: "backlog" },
+          "ascent",
+          { estimate_min: est },
+        );
+        return json({ task, parsed: { dueISO: due, estimateMin: est } }, 201);
+      }
+
+      // ---------- sprints ----------
+      const sprintId = () => `sp${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
+      async function sprintTasks(s: SprintLink): Promise<any[]> {
+        const out: any[] = [];
+        const projName = new Map<string, string>();
+        for (const pl of links.projects) {
+          const p = await hydrateProject(pl).catch(() => null);
+          if (p) projName.set(pl.id, p.name);
+        }
+        for (const tid of s.task_ids) {
+          const l = links.tasks[tid];
+          if (!l) continue;
+          try {
+            const o = await getObject(config.space_id, tid);
+            const tv = toTaskView(o, config.task_keys);
+            const sp = subtaskProgress(l.subtasks);
+            out.push({
+              ...tv,
+              status: effectiveStatus(tv.done, l),
+              source: l.source,
+              project_id: l.project_id,
+              project_name: projName.get(l.project_id) || "",
+              blocked_by: Array.isArray(l.blocked_by) ? l.blocked_by : [],
+              estimate_min: typeof l.estimate_min === "number" ? l.estimate_min : null,
+              subtask_done: sp.done,
+              subtask_total: sp.total,
+            });
+          } catch { /* pruned below on read paths */ }
+        }
+        return out;
+      }
+      if (path === "/api/sprints" && method === "GET") {
+        const gate = needSpace();
+        if (gate) return gate;
+        const withCounts = links.sprints.map((s) => ({
+          ...s,
+          total: s.task_ids.filter((id) => links.tasks[id]).length,
+        }));
+        return json({
+          open: withCounts.filter((s) => s.status === "open"),
+          closed: withCounts.filter((s) => s.status === "closed"),
+        });
+      }
+      if (path === "/api/sprints" && method === "POST") {
+        const gate = needSpace();
+        if (gate) return gate;
+        const b = await readBody(req);
+        if (!String(b.name || "").trim()) return json({ error: "sprint name is required" }, 400);
+        const wk = thisWeekRange();
+        const s: SprintLink = {
+          id: sprintId(),
+          name: String(b.name).trim(),
+          start: String(b.start || wk.start),
+          end: String(b.end || wk.end),
+          task_ids: [],
+          status: "open",
+          created_at: new Date().toISOString(),
+        };
+        links.sprints.unshift(s);
+        saveLinks();
+        return json({ sprint: s }, 201);
+      }
+      const sprintMatch = path.match(/^\/api\/sprints\/([^/]+)$/);
+      if (sprintMatch) {
+        const sid = sprintMatch[1];
+        const s = links.sprints.find((x) => x.id === sid);
+        if (!s) return json({ error: "sprint not found" }, 404);
+        if (method === "GET") {
+          const gate = needSpace();
+          if (gate) return gate;
+          // Prune task ids whose tasks were deleted since.
+          const live = s.task_ids.filter((id) => links.tasks[id]);
+          if (live.length !== s.task_ids.length) { s.task_ids = live; saveLinks(); }
+          return json({ sprint: s, tasks: await sprintTasks(s) });
+        }
+        if (method === "PATCH") {
+          const gate = needSpace();
+          if (gate) return gate;
+          if (s.status !== "open") return json({ error: "sprint is closed" }, 400);
+          const b = await readBody(req);
+          if (b.name !== undefined && String(b.name).trim()) s.name = String(b.name).trim();
+          if (b.start) s.start = String(b.start);
+          if (b.end) s.end = String(b.end);
+          saveLinks();
+          return json({ sprint: s });
+        }
+        if (method === "DELETE") {
+          const gate = needSpace();
+          if (gate) return gate;
+          links.sprints = links.sprints.filter((x) => x.id !== sid);
+          saveLinks();
+          return json({ ok: true });
+        }
+      }
+      const sprintAddMatch = path.match(/^\/api\/sprints\/([^/]+)\/tasks$/);
+      if (sprintAddMatch && method === "POST") {
+        const gate = needSpace();
+        if (gate) return gate;
+        const s = links.sprints.find((x) => x.id === sprintAddMatch[1]);
+        if (!s) return json({ error: "sprint not found" }, 404);
+        if (s.status !== "open") return json({ error: "sprint is closed" }, 400);
+        const b = await readBody(req);
+        const tid = String(b.task_id || "");
+        if (!links.tasks[tid]) return json({ error: "task not tracked" }, 404);
+        if (!s.task_ids.includes(tid)) { s.task_ids.push(tid); saveLinks(); }
+        return json({ ok: true, sprint: s });
+      }
+      const sprintDelMatch = path.match(/^\/api\/sprints\/([^/]+)\/tasks\/([^/]+)$/);
+      if (sprintDelMatch && method === "DELETE") {
+        const gate = needSpace();
+        if (gate) return gate;
+        const s = links.sprints.find((x) => x.id === sprintDelMatch[1]);
+        if (!s) return json({ error: "sprint not found" }, 404);
+        if (s.status !== "open") return json({ error: "sprint is closed" }, 400);
+        s.task_ids = s.task_ids.filter((x) => x !== sprintDelMatch[2]);
+        saveLinks();
+        return json({ ok: true });
+      }
+      const sprintCloseMatch = path.match(/^\/api\/sprints\/([^/]+)\/close$/);
+      if (sprintCloseMatch && method === "POST") {
+        const gate = needSpace();
+        if (gate) return gate;
+        const s = links.sprints.find((x) => x.id === sprintCloseMatch[1]);
+        if (!s) return json({ error: "sprint not found" }, 404);
+        if (s.status !== "open") return json({ error: "sprint is already closed" }, 400);
+        // Unfinished tasks return to their project backlogs; done tasks stay done.
+        let returned = 0;
+        for (const tid of [...s.task_ids]) {
+          const l = links.tasks[tid];
+          if (!l) continue;
+          if (l.status !== "done") {
+            try { await applyTaskUpdate(tid, { status: "backlog" }); } catch { /* keep going */ }
+            returned++;
+          }
+        }
+        s.status = "closed";
+        s.closed_at = new Date().toISOString();
+        saveLinks();
+        return json({ ok: true, sprint: s, returned_to_backlog: returned });
       }
 
       // ---------- wiki ----------
